@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+ai/venv/
+ai/data/raw/
+ai/data/processed/
+ai/data/sequences/
+ai/models/
+.env
+.DS_Store

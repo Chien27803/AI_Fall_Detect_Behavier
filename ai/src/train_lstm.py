@@ -7,13 +7,14 @@ from keras.models import Sequential
 from sklearn.model_selection import train_test_split
 
 DATASET_DIR = Path("dataset")
-NO_OF_TIMESTEPS = 15
+NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
 
 LABEL_MAP = {
     "NORMAL": 0,
     "HAND WAVING": 1,
     "BODYSWING": 2,
+    "FALL": 3,
 }
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]
@@ -21,7 +22,7 @@ CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])
 X = []
 y = []
 
-csv_files = list(DATASET_DIR.glob("*.csv"))
+csv_files = list(DATASET_DIR.rglob("*.csv"))
 
 if not csv_files:
     raise FileNotFoundError(f"Không tìm thấy file csv trong: {DATASET_DIR.resolve()}")
@@ -49,7 +50,6 @@ for file_path in csv_files:
     else:
         dataset = df.values
 
-    # kiểm tra số feature
     if dataset.shape[1] != NUM_FEATURES:
         print(
             f"[BỎ QUA] {file_path.name} có {dataset.shape[1]} features, "
@@ -66,7 +66,6 @@ for file_path in csv_files:
         )
         continue
 
-    # cắt sliding window
     count_samples = 0
     for i in range(NO_OF_TIMESTEPS, n_frames + 1):
         X.append(dataset[i - NO_OF_TIMESTEPS:i, :])

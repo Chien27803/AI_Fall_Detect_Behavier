@@ -6,9 +6,9 @@ from collections import deque
 
 # ====== CONFIG ======
 MODEL_PATH = "model.h5"
-NO_OF_TIMESTEPS = 15
+NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
-CLASS_NAMES = ["NORMAL", "HAND WAVING", "BODYSWING"]
+CLASS_NAMES = ["NORMAL", "HAND WAVING", "BODYSWING", "FALL"]
 
 label = "Warmup..."
 confidence_text = ""
@@ -93,11 +93,16 @@ def detect(model, lm_list):
         confidence_text = "0.00"
         return
 
-    lm_array = np.expand_dims(lm_array, axis=0)  # (1, 10, 132)
+    lm_array = np.expand_dims(lm_array, axis=0)  # shape: (1, NO_OF_TIMESTEPS, NUM_FEATURES)
 
     preds = model.predict(lm_array, verbose=0)[0]
     class_id = int(np.argmax(preds))
     confidence = float(preds[class_id])
+
+    if class_id >= len(CLASS_NAMES):
+        label = "Unknown"
+        confidence_text = f"{confidence:.2f}"
+        return
 
     # nhãn hiện tại
     current_label = CLASS_NAMES[class_id]
@@ -127,11 +132,11 @@ while True:
         c_lm = make_landmark_timestep(results)
         lm_list.append(c_lm)
 
-        # Giữ đúng 10 frame gần nhất
+        # Giữ đúng NO_OF_TIMESTEPS frame gần nhất
         if len(lm_list) > NO_OF_TIMESTEPS:
             lm_list.pop(0)
 
-        # Khi đủ 10 frame thì predict
+        # Khi đủ NO_OF_TIMESTEPS frame thì predict
         if len(lm_list) == NO_OF_TIMESTEPS:
             detect(model, lm_list)
 

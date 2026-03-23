@@ -10,8 +10,8 @@ BASE_DIR = SRC_DIR.parent
 VIDEO_DIR = BASE_DIR / "data" / "raw"
 
 # chọn subject muốn convert
-SUBJECTS_TO_PROCESS = ["subject2"]   # đổi thành ["subject1"] khi làm train
-OUTPUT_SUBFOLDER = "train"            # đổi thành "train" khi làm train
+SUBJECTS_TO_PROCESS = ["subject4"]   # đổi thành ["subject1"] khi làm train
+OUTPUT_SUBFOLDER = "train_s4"            # đổi thành "train" khi làm train
 
 OUTPUT_DIR = SRC_DIR / "dataset" / OUTPUT_SUBFOLDER
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

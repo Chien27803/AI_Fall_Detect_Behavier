@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from keras.layers import LSTM, Dense, Dropout
+from keras.layers import LSTM, Dense, Dropout, Input
 from keras.models import Sequential
 from sklearn.model_selection import train_test_split
 
@@ -11,101 +11,132 @@ NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
 
 LABEL_MAP = {
-    "BODYSWING": 0,
-    "HAND_WAVING": 1,
-    "WALKING": 2,
-    "FALL": 3,
-    "RUNNING": 4,
-    "BENDING":5
+    "ADL": 0,
+    "BOXING":1,
+    "FALL": 2,
 }
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]
 
-X = []
-y = []
+
+def get_label_from_filename(file_path: Path):
+    file_name = file_path.stem.upper()
+    for prefix, label_value in LABEL_MAP.items():
+        if file_name.startswith(prefix.upper()):
+            return label_value, prefix
+    return None, None
+
+
+def load_csv_file(file_path: Path):
+    df = pd.read_csv(file_path)
+
+    if df.shape[1] == 133:
+        data = df.iloc[:, 1:].values
+    else:
+        data = df.values
+
+    if data.shape[1] != NUM_FEATURES:
+        print(
+            f"[BỎ QUA] {file_path.name} có {data.shape[1]} features, "
+            f"cần đúng {NUM_FEATURES} features"
+        )
+        return None
+
+    if data.shape[0] < NO_OF_TIMESTEPS:
+        print(
+            f"[BỎ QUA] {file_path.name} có {data.shape[0]} frame, "
+            f"ít hơn NO_OF_TIMESTEPS={NO_OF_TIMESTEPS}"
+        )
+        return None
+
+    return data
+
+
+def create_samples_from_sequence(sequence, label):
+    X_samples = []
+    y_samples = []
+
+    n_frames = sequence.shape[0]
+
+    for i in range(NO_OF_TIMESTEPS, n_frames + 1):
+        X_samples.append(sequence[i - NO_OF_TIMESTEPS:i, :])
+        y_samples.append(label)
+
+    return X_samples, y_samples
+
+
+# ===== 1. Lấy danh sách file hợp lệ =====
+file_infos = []
 
 csv_files = list(DATASET_DIR.rglob("*.csv"))
-
 if not csv_files:
     raise FileNotFoundError(f"Không tìm thấy file csv trong: {DATASET_DIR.resolve()}")
 
 for file_path in csv_files:
-    file_name = file_path.stem.upper()
+    label, prefix = get_label_from_filename(file_path)
 
-    matched_label = None
-    matched_prefix = None
-
-    for prefix, label_value in LABEL_MAP.items():
-        if file_name.startswith(prefix.upper()):
-            matched_label = label_value
-            matched_prefix = prefix
-            break
-
-    if matched_label is None:
+    if label is None:
         print(f"[BỎ QUA] Không nhận diện được nhãn của file: {file_path.name}")
         continue
 
-    df = pd.read_csv(file_path)
-
-    if df.shape[1] == 133:
-        dataset = df.iloc[:, 1:].values
-    else:
-        dataset = df.values
-
-    if dataset.shape[1] != NUM_FEATURES:
-        print(
-            f"[BỎ QUA] {file_path.name} có {dataset.shape[1]} features, "
-            f"cần đúng {NUM_FEATURES} features"
-        )
+    sequence = load_csv_file(file_path)
+    if sequence is None:
         continue
 
-    n_frames = dataset.shape[0]
+    file_infos.append((file_path, sequence, label, prefix))
 
-    if n_frames < NO_OF_TIMESTEPS:
-        print(
-            f"[BỎ QUA] {file_path.name} có {n_frames} frame, "
-            f"ít hơn NO_OF_TIMESTEPS={NO_OF_TIMESTEPS}"
-        )
-        continue
+if not file_infos:
+    raise ValueError("Không có file hợp lệ nào để train.")
 
-    count_samples = 0
-    for i in range(NO_OF_TIMESTEPS, n_frames + 1):
-        X.append(dataset[i - NO_OF_TIMESTEPS:i, :])
-        y.append(matched_label)
-        count_samples += 1
+# ===== 2. Chia train/test theo FILE trước =====
+labels_for_split = [item[2] for item in file_infos]
 
-    print(
-        f"[OK] {file_path.name} -> {matched_prefix} ({matched_label}), "
-        f"frames={n_frames}, samples={count_samples}"
-    )
-
-X = np.array(X, dtype=np.float32)
-y = np.array(y, dtype=np.int32)
-
-print("X shape:", X.shape)
-print("y shape:", y.shape)
-
-if len(X) == 0:
-    raise ValueError("Không có sample hợp lệ nào trong dataset.")
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
+train_files, test_files = train_test_split(
+    file_infos,
     test_size=0.2,
     random_state=42,
-    stratify=y
+    stratify=labels_for_split
 )
+
+# ===== 3. Tạo sample từ train files =====
+X_train, y_train = [], []
+for file_path, sequence, label, prefix in train_files:
+    x_part, y_part = create_samples_from_sequence(sequence, label)
+    X_train.extend(x_part)
+    y_train.extend(y_part)
+    print(f"[TRAIN] {file_path.name} -> {prefix} ({label}), samples={len(x_part)}")
+
+# ===== 4. Tạo sample từ test files =====
+X_test, y_test = [], []
+for file_path, sequence, label, prefix in test_files:
+    x_part, y_part = create_samples_from_sequence(sequence, label)
+    X_test.extend(x_part)
+    y_test.extend(y_part)
+    print(f"[TEST] {file_path.name} -> {prefix} ({label}), samples={len(x_part)}")
+
+X_train = np.array(X_train, dtype=np.float32)
+y_train = np.array(y_train, dtype=np.int32)
+
+X_test = np.array(X_test, dtype=np.float32)
+y_test = np.array(y_test, dtype=np.int32)
+
+print("X_train shape:", X_train.shape)
+print("y_train shape:", y_train.shape)
+print("X_test shape:", X_test.shape)
+print("y_test shape:", y_test.shape)
 
 num_classes = len(CLASS_NAMES)
 
-model = Sequential()
-model.add(LSTM(64, return_sequences=True, input_shape=(NO_OF_TIMESTEPS, NUM_FEATURES)))
-model.add(Dropout(0.2))
-model.add(LSTM(64))
-model.add(Dropout(0.2))
-model.add(Dense(32, activation="relu"))
-model.add(Dropout(0.2))
-model.add(Dense(num_classes, activation="softmax"))
+model = Sequential([
+    Input(shape=(NO_OF_TIMESTEPS, NUM_FEATURES)),
+    LSTM(64, return_sequences=True),
+    Dropout(0.2),
+    LSTM(64),
+    Dropout(0.2),
+    Dense(32, activation="relu"),
+    Dropout(0.2),
+    Dense(num_classes, activation="softmax")
+])
 
 model.compile(
     optimizer="adam",

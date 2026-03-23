@@ -4,8 +4,8 @@ import pandas as pd
 import os
 
 # ====== CONFIG ======
-label = "NORMAL"   # đổi label khi thu hành động khác
-no_of_frames = 50     # số frame cho 1 sample (chuẩn LSTM)
+label = "FALL"   # đổi label khi thu hành động khác
+no_of_frames = 300     # số frame cho 1 sample (chuẩn LSTM)
 save_path = "dataset" # thư mục lưu data
 os.makedirs(save_path, exist_ok=True)
 

@@ -11,10 +11,12 @@ NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
 
 LABEL_MAP = {
-    "NORMAL": 0,
-    "HAND WAVING": 1,
-    "BODYSWING": 2,
+    "BODYSWING": 0,
+    "HAND_WAVING": 1,
+    "WALKING": 2,
     "FALL": 3,
+    "RUNNING": 4,
+    "BENDING":5
 }
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]

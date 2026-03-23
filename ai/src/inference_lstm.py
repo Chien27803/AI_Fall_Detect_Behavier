@@ -8,7 +8,7 @@ from collections import deque
 MODEL_PATH = "model.h5"
 NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
-CLASS_NAMES = ["NORMAL", "HAND WAVING", "BODYSWING", "FALL"]
+CLASS_NAMES = ["BODYSWING", "HAND_WAVING", "WALKING", "FALL","RUNNING","BENDING"]
 
 label = "Warmup..."
 confidence_text = ""

@@ -8,7 +8,7 @@ from collections import deque
 MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
-CLASS_NAMES = ["ADL","BOXING","FALL"]
+CLASS_NAMES = ["ADL", "BOXING", "FALL"]
 CONFIDENCE_THRESHOLD = 0.7
 
 label = "Warmup..."
@@ -33,10 +33,31 @@ frame_count = 0
 
 
 def make_landmark_timestep(results):
-    c_lm = []
+    """
+    Lấy landmark 1 frame và chuyển từ tọa độ tuyệt đối
+    sang tọa độ tương đối theo hip center.
+    """
+    frame = []
+
     for lm in results.pose_landmarks.landmark:
-        c_lm.extend([lm.x, lm.y, lm.z, lm.visibility])
-    return c_lm
+        frame.append([lm.x, lm.y, lm.z, lm.visibility])
+
+    frame = np.array(frame, dtype=np.float32)  # shape (33, 4)
+
+    LEFT_HIP_IDX = 23
+    RIGHT_HIP_IDX = 24
+
+    hip_center_x = (frame[LEFT_HIP_IDX, 0] + frame[RIGHT_HIP_IDX, 0]) / 2.0
+    hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
+    hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
+
+    # chuyển x, y, z sang tọa độ tương đối
+    frame[:, 0] = frame[:, 0] - hip_center_x
+    frame[:, 1] = frame[:, 1] - hip_center_y
+    frame[:, 2] = frame[:, 2] - hip_center_z
+
+    # visibility giữ nguyên
+    return frame.reshape(-1).tolist()
 
 
 def draw_landmark_on_image(results, img):

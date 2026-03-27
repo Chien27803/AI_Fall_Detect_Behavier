@@ -5,7 +5,7 @@ import tensorflow as tf
 from collections import deque
 
 # ====== CONFIG ======
-MODEL_PATH = "model.h5"
+MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
 CLASS_NAMES = ["ADL","BOXING","FALL"]

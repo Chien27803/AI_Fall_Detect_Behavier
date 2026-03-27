@@ -1,9 +1,10 @@
-import numpy as np
-import pandas as pd
+import numpy as np  # xử lý mảng số
+import pandas as pd  # đọc file csv
 from pathlib import Path
 
 from keras.layers import LSTM, Dense, Dropout, Input
 from keras.models import Sequential
+from keras.callbacks import ModelCheckpoint, EarlyStopping
 from sklearn.model_selection import train_test_split
 
 DATASET_DIR = Path("dataset")
@@ -12,7 +13,7 @@ NUM_FEATURES = 132
 
 LABEL_MAP = {
     "ADL": 0,
-    "BOXING":1,
+    "BOXING": 1,
     "FALL": 2,
 }
 
@@ -144,14 +145,35 @@ model.compile(
     metrics=["accuracy"]
 )
 
-model.fit(
+checkpoint = ModelCheckpoint(
+    filepath="best_model.keras",
+    monitor="val_accuracy",
+    save_best_only=True,
+    mode="max",
+    verbose=1
+)
+
+early_stopping = EarlyStopping(
+    monitor="val_accuracy",
+    patience=5,
+    mode="max",
+    restore_best_weights=True,
+    verbose=1
+)
+
+history = model.fit(
     X_train,
     y_train,
     epochs=20,
     batch_size=16,
-    validation_data=(X_test, y_test)
+    validation_data=(X_test, y_test),
+    callbacks=[checkpoint, early_stopping]
 )
 
-model.save("model.h5")
-print("Đã lưu model.h5")
+test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
+print(f"Test loss: {test_loss:.4f}")
+print(f"Test accuracy: {test_acc:.4f}")
+
+model.save("final_model.keras")
+print("Đã lưu best_model.keras và final_model.keras")
 print("Class names:", CLASS_NAMES)

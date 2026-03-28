@@ -17,7 +17,7 @@ LEARNING_RATE = 0.001
 
 LABEL_MAP = {
     "ADL": 0,
-    "BOXING": 1,
+    "BOXING": 1, 
     "FALL": 2,
 }
 
@@ -232,7 +232,7 @@ early_stopping = EarlyStopping(
 history = model.fit(
     X_train,
     y_train,
-    epochs=20,
+    epochs=15,
     batch_size=16,
     validation_data=(X_test, y_test),
     callbacks=[checkpoint]

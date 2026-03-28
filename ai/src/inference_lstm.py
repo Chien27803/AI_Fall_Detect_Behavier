@@ -2,7 +2,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import tensorflow as tf
-from collections import deque
+from collections import deque, Counter
 
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
@@ -33,10 +33,6 @@ frame_count = 0
 
 
 def make_landmark_timestep(results):
-    """
-    Lấy landmark 1 frame và chuyển từ tọa độ tuyệt đối
-    sang tọa độ tương đối theo hip center.
-    """
     frame = []
 
     for lm in results.pose_landmarks.landmark:
@@ -51,12 +47,10 @@ def make_landmark_timestep(results):
     hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
     hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
 
-    # chuyển x, y, z sang tọa độ tương đối
-    frame[:, 0] = frame[:, 0] - hip_center_x
-    frame[:, 1] = frame[:, 1] - hip_center_y
-    frame[:, 2] = frame[:, 2] - hip_center_z
+    frame[:, 0] -= hip_center_x
+    frame[:, 1] -= hip_center_y
+    frame[:, 2] -= hip_center_z
 
-    # visibility giữ nguyên
     return frame.reshape(-1).tolist()
 
 
@@ -68,7 +62,14 @@ def draw_landmark_on_image(results, img):
 def draw_class_on_image(label_text, conf_text, img):
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+    if label_text == "FALL":
+        action_color = (0, 0, 255)      # đỏ
+    elif label_text == "BOXING":
+        action_color = (255, 0, 0)      # xanh dương
+    else:
+        action_color = (0, 255, 0)      # xanh lá
+
+    cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(img, "Press 'q' to quit", (10, 100), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -102,7 +103,7 @@ def detect(model, lm_list):
         current_label = CLASS_NAMES[class_id]
 
     pred_history.append(current_label)
-    smoothed_label = max(set(pred_history), key=pred_history.count)
+    smoothed_label = Counter(pred_history).most_common(1)[0][0]
 
     label = smoothed_label
     confidence_text = f"{confidence:.2f}"

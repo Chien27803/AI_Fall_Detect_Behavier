@@ -3,6 +3,10 @@ import mediapipe as mp
 import numpy as np
 import tensorflow as tf
 from collections import deque, Counter
+from datetime import datetime
+import pygame
+import os
+import sys
 
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
@@ -10,17 +14,37 @@ NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
 CLASS_NAMES = ["ADL", "BOXING", "FALL"]
 CONFIDENCE_THRESHOLD = 0.7
+ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
 label = "Warmup..."
 confidence_text = ""
 
 pred_history = deque(maxlen=5)
+alarm_playing = False
+
+# lấy đường dẫn tuyệt đối của file âm thanh theo thư mục file .py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ALARM_PATH = os.path.join(BASE_DIR, ALARM_FILE)
 
 # ====== LOAD MODEL ======
 model = tf.keras.models.load_model(MODEL_PATH)
 
+# ====== INIT AUDIO ======
+try:
+    pygame.mixer.init()
+    if not os.path.exists(ALARM_PATH):
+        print(f"Không tìm thấy file âm thanh: {ALARM_PATH}")
+        sys.exit()
+    pygame.mixer.music.load(ALARM_PATH)
+except Exception as e:
+    print(f"Lỗi khởi tạo âm thanh: {e}")
+    sys.exit()
+
 # ====== CAMERA ======
 cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Không mở được webcam")
+    sys.exit()
 
 # ====== MEDIAPIPE ======
 mpPose = mp.solutions.pose
@@ -38,7 +62,7 @@ def make_landmark_timestep(results):
     for lm in results.pose_landmarks.landmark:
         frame.append([lm.x, lm.y, lm.z, lm.visibility])
 
-    frame = np.array(frame, dtype=np.float32)  # shape (33, 4)
+    frame = np.array(frame, dtype=np.float32)
 
     LEFT_HIP_IDX = 23
     RIGHT_HIP_IDX = 24
@@ -63,17 +87,71 @@ def draw_class_on_image(label_text, conf_text, img):
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     if label_text == "FALL":
-        action_color = (0, 0, 255)      # đỏ
+        action_color = (0, 0, 255)
     elif label_text == "BOXING":
-        action_color = (255, 0, 0)      # xanh dương
+        action_color = (255, 0, 0)
     else:
-        action_color = (0, 255, 0)      # xanh lá
+        action_color = (0, 255, 0)
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(img, "Press 'q' to quit", (10, 100), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     return img
+
+
+def draw_datetime_on_image(img):
+    current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.7
+    thickness = 2
+    text_color = (255, 255, 255)  # trắng
+    padding = 10
+
+    (text_width, text_height), baseline = cv2.getTextSize(
+        current_time, font, font_scale, thickness
+    )
+
+    x = img.shape[1] - text_width - padding
+    y = 30
+
+    cv2.putText(
+        img,
+        current_time,
+        (x, y),
+        font,
+        font_scale,
+        text_color,
+        thickness,
+        cv2.LINE_AA
+    )
+
+    return img
+
+
+def start_alarm():
+    global alarm_playing
+    if not alarm_playing:
+        try:
+            pygame.mixer.music.play(-1)
+            alarm_playing = True
+        except Exception as e:
+            print(f"Không phát được âm thanh: {e}")
+
+
+def stop_alarm():
+    global alarm_playing
+    if alarm_playing:
+        pygame.mixer.music.stop()
+        alarm_playing = False
+
+
+def handle_alarm(current_label):
+    if current_label == "FALL":
+        start_alarm()
+    else:
+        stop_alarm()
 
 
 def detect(model, lm_list):
@@ -138,11 +216,15 @@ while True:
             confidence_text = "0.00"
 
     img = draw_class_on_image(label, confidence_text, img)
+    img = draw_datetime_on_image(img)
+    handle_alarm(label)
 
     cv2.imshow("LSTM Action Recognition", img)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
+stop_alarm()
 cap.release()
 cv2.destroyAllWindows()
+pygame.mixer.quit()

@@ -1,5 +1,6 @@
-import numpy as np  # xử lý mảng số
-import pandas as pd  # đọc file csv
+import numpy as np
+import pandas as pd
+import tensorflow as tf
 from pathlib import Path
 from collections import Counter
 
@@ -13,11 +14,13 @@ from sklearn.metrics import confusion_matrix, classification_report
 DATASET_DIR = Path("dataset")
 NO_OF_TIMESTEPS = 30
 NUM_FEATURES = 132
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0005
+EPOCHS = 15
+BATCH_SIZE = 16
 
 LABEL_MAP = {
     "ADL": 0,
-    "BOXING": 1, 
+    "BOXING": 1,
     "FALL": 2,
 }
 
@@ -48,15 +51,15 @@ def convert_to_relative_coordinates(sequence: np.ndarray) -> np.ndarray:
     RIGHT_HIP_IDX = 24
 
     for i in range(relative_sequence.shape[0]):
-        frame = relative_sequence[i].reshape(33, 4)  # (33 landmarks, [x, y, z, visibility])
+        frame = relative_sequence[i].reshape(33, 4)
 
         hip_center_x = (frame[LEFT_HIP_IDX, 0] + frame[RIGHT_HIP_IDX, 0]) / 2.0
         hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
         hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
 
-        frame[:, 0] = frame[:, 0] - hip_center_x
-        frame[:, 1] = frame[:, 1] - hip_center_y
-        frame[:, 2] = frame[:, 2] - hip_center_z
+        frame[:, 0] -= hip_center_x
+        frame[:, 1] -= hip_center_y
+        frame[:, 2] -= hip_center_z
 
         relative_sequence[i] = frame.reshape(-1)
 
@@ -66,7 +69,8 @@ def convert_to_relative_coordinates(sequence: np.ndarray) -> np.ndarray:
 def load_csv_file(file_path: Path):
     df = pd.read_csv(file_path)
 
-    if df.shape[1] == 133:
+    # Nếu cột đầu là index thì bỏ đi
+    if df.shape[1] == NUM_FEATURES + 1:
         data = df.iloc[:, 1:].values
     else:
         data = df.values
@@ -89,7 +93,7 @@ def load_csv_file(file_path: Path):
     return data
 
 
-def create_samples_from_sequence(sequence, label):
+def create_samples_from_sequence(sequence: np.ndarray, label: int):
     X_samples = []
     y_samples = []
 
@@ -194,6 +198,7 @@ print(f"Learning rate: {LEARNING_RATE}")
 
 num_classes = len(CLASS_NAMES)
 
+# ===== 5. Build model =====
 model = Sequential([
     Input(shape=(NO_OF_TIMESTEPS, NUM_FEATURES)),
     LSTM(64, return_sequences=True),
@@ -213,6 +218,7 @@ model.compile(
     metrics=["accuracy"]
 )
 
+# ===== 6. Callbacks =====
 checkpoint = ModelCheckpoint(
     filepath="best_model.keras",
     monitor="val_accuracy",
@@ -229,32 +235,42 @@ early_stopping = EarlyStopping(
     verbose=1
 )
 
+# ===== 7. Train =====
 history = model.fit(
     X_train,
     y_train,
-    epochs=15,
-    batch_size=16,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
     validation_data=(X_test, y_test),
-    callbacks=[checkpoint]
+    callbacks=[checkpoint, early_stopping]
 )
 
-test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
+# Lưu model ở epoch cuối cùng
+model.save("final_model.keras")
+
+# ===== 8. Load best model để đánh giá =====
+best_model = tf.keras.models.load_model("best_model.keras")
+
+test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
 print(f"\nTest loss: {test_loss:.4f}")
 print(f"Test accuracy: {test_acc:.4f}")
 
-# ===== 5. Confusion Matrix =====
-y_pred_probs = model.predict(X_test, verbose=0)
+# ===== 9. Confusion Matrix + Classification Report =====
+y_pred_probs = best_model.predict(X_test, verbose=0)
 y_pred = np.argmax(y_pred_probs, axis=1)
 
 cm = confusion_matrix(y_test, y_pred, labels=list(range(num_classes)))
 
 print("\n===== CONFUSION MATRIX =====")
-cm_df = pd.DataFrame(cm, index=[f"TRUE_{c}" for c in CLASS_NAMES], columns=[f"PRED_{c}" for c in CLASS_NAMES])
+cm_df = pd.DataFrame(
+    cm,
+    index=[f"TRUE_{c}" for c in CLASS_NAMES],
+    columns=[f"PRED_{c}" for c in CLASS_NAMES]
+)
 print(cm_df)
 
 print("\n===== CLASSIFICATION REPORT =====")
 print(classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4))
 
-model.save("final_model.keras")
-print("Đã lưu best_model.keras và final_model.keras")
+print("\nĐã lưu best_model.keras và final_model.keras")
 print("Class names:", CLASS_NAMES)

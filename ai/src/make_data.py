@@ -4,9 +4,14 @@ import pandas as pd
 import os
 
 # ====== CONFIG ======
-label = "HAND_WAVING"   # đổi label khi thu hành động khác
-no_of_frames = 150     # số frame cho 1 sample (chuẩn LSTM)
-save_path = "dataset" # thư mục lưu data
+label = "FALL"   # đổi label khi thu hành động khác
+subject_name = "subject7"
+no_of_frames = 140      # số frame cho 1 sample (chuẩn LSTM)
+
+base_save_path = "dataset"
+subfolder_name = "train_s7"
+save_path = os.path.join(base_save_path, subfolder_name)
+
 os.makedirs(save_path, exist_ok=True)
 
 # ====== CAMERA ======
@@ -19,14 +24,38 @@ mpDraw = mp.solutions.drawing_utils
 
 lm_list = []
 recording = False  # trạng thái ghi
+prev_landmarks = None  # dùng để tính vx, vy, vz
+
 
 # ====== FUNCTION ======
-def make_landmark_timestep(results):
-    c_lm = []
+def extract_current_landmarks(results):
+    coords = []
     for lm in results.pose_landmarks.landmark:
-        print(lm.x, lm.y, lm.z, lm.visibility)  # 🔥 in ra terminal
-        c_lm.extend([lm.x, lm.y, lm.z, lm.visibility])
-    return c_lm
+        coords.append([lm.x, lm.y, lm.z, lm.visibility])
+    return coords
+
+
+def make_landmark_timestep(results, prev_landmarks=None):
+    current_landmarks = extract_current_landmarks(results)
+    c_lm = []
+
+    for i, lm in enumerate(current_landmarks):
+        x, y, z, visibility = lm
+
+        if prev_landmarks is None:
+            vx, vy, vz = 0.0, 0.0, 0.0
+        else:
+            prev_x, prev_y, prev_z, _ = prev_landmarks[i]
+            vx = x - prev_x
+            vy = y - prev_y
+            vz = z - prev_z
+
+        # in ra terminal để kiểm tra
+        print(x, y, z, visibility, vx, vy, vz)
+
+        c_lm.extend([x, y, z, visibility, vx, vy, vz])
+
+    return c_lm, current_landmarks
 
 
 def draw_landmark_on_image(results, img):
@@ -35,8 +64,9 @@ def draw_landmark_on_image(results, img):
 
 
 def get_next_filename():
-    files = [f for f in os.listdir(save_path) if f.startswith(label)]
-    return f"{label}_{len(files)+1}.csv"
+    prefix = f"{label}_{subject_name}_"
+    files = [f for f in os.listdir(save_path) if f.startswith(prefix) and f.endswith(".csv")]
+    return f"{label}_{subject_name}_{len(files) + 1}.csv"
 
 
 # ====== LOOP ======
@@ -52,23 +82,37 @@ while True:
         frame = draw_landmark_on_image(results, frame)
 
         if recording:
-            lm = make_landmark_timestep(results)
+            lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
             lm_list.append(lm)
 
             # đủ frame thì lưu file
             if len(lm_list) == no_of_frames:
                 df = pd.DataFrame(lm_list)
                 file_name = get_next_filename()
-                df.to_csv(os.path.join(save_path, file_name), index=False)
-                print(f"✅ Saved: {file_name}")
+                full_path = os.path.join(save_path, file_name)
+                df.to_csv(full_path, index=False)
+                print(f"✅ Saved: {full_path}")
 
                 lm_list = []
                 recording = False
+                prev_landmarks = None
+
+    else:
+        # nếu mất pose trong lúc record thì reset prev_landmarks
+        if recording:
+            prev_landmarks = None
 
     # ====== HIỂN THỊ ======
     status = "RECORDING..." if recording else "Press 'r' to record"
-    cv2.putText(frame, status, (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(
+        frame,
+        status,
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2
+    )
 
     cv2.imshow("Data Collection", frame)
 
@@ -78,6 +122,7 @@ while True:
         print("🎬 Start recording...")
         recording = True
         lm_list = []
+        prev_landmarks = None
 
     elif key == ord('q'):
         break

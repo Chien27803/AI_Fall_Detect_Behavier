@@ -16,6 +16,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 LABEL = "FALL"
+SUBJECT_NAME = "subject5"
 
 # ====== MEDIAPIPE ======
 mp_pose = mp.solutions.pose
@@ -54,11 +55,11 @@ def get_sorted_image_files(folder_path: Path):
     return sorted(image_files, key=lambda x: x.name)
 
 
-def build_output_filename(image_folder: Path):
-    return f"{LABEL}_{image_folder.name}.csv"
+def build_output_filename(index: int):
+    return f"{LABEL}_{SUBJECT_NAME}_{index:02d}.csv"
 
 
-def extract_image_folder_to_csv(image_folder: Path):
+def extract_image_folder_to_csv(image_folder: Path, index: int):
     image_files = get_sorted_image_files(image_folder)
 
     if not image_files:
@@ -89,7 +90,7 @@ def extract_image_folder_to_csv(image_folder: Path):
         return
 
     df = pd.DataFrame(lm_list)
-    output_file = OUTPUT_DIR / build_output_filename(image_folder)
+    output_file = OUTPUT_DIR / build_output_filename(index)
     df.to_csv(output_file, index=False)
 
     print(
@@ -112,8 +113,8 @@ def main():
 
     print(f"Tìm thấy {len(image_folders)} folder ảnh FALL")
 
-    for image_folder in image_folders:
-        extract_image_folder_to_csv(image_folder)
+    for idx, image_folder in enumerate(image_folders, start=1):
+        extract_image_folder_to_csv(image_folder, idx)
 
     print("Hoàn tất chuyển folder ảnh -> csv")
 

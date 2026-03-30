@@ -10,9 +10,9 @@ import sys
 
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
-NO_OF_TIMESTEPS = 30
-NUM_FEATURES = 132
-CLASS_NAMES = ["ADL", "BOXING", "FALL"]
+NO_OF_TIMESTEPS = 35
+NUM_FEATURES = 231
+CLASS_NAMES = ["ADL", "BOXING", "FALL","HAND_WAVING"]
 CONFIDENCE_THRESHOLD = 0.7
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
@@ -54,28 +54,47 @@ mpDraw = mp.solutions.drawing_utils
 lm_list = []
 warmup_frames = 30
 frame_count = 0
+prev_landmarks = None
 
 
-def make_landmark_timestep(results):
-    frame = []
-
+def extract_current_landmarks(results):
+    coords = []
     for lm in results.pose_landmarks.landmark:
-        frame.append([lm.x, lm.y, lm.z, lm.visibility])
+        coords.append([lm.x, lm.y, lm.z, lm.visibility])
+    return np.array(coords, dtype=np.float32)  # shape (33, 4)
 
-    frame = np.array(frame, dtype=np.float32)
+
+def make_landmark_timestep(results, prev_landmarks=None):
+    current_landmarks = extract_current_landmarks(results)  # (33, 4)
 
     LEFT_HIP_IDX = 23
     RIGHT_HIP_IDX = 24
 
-    hip_center_x = (frame[LEFT_HIP_IDX, 0] + frame[RIGHT_HIP_IDX, 0]) / 2.0
-    hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
-    hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
+    hip_center_x = (current_landmarks[LEFT_HIP_IDX, 0] + current_landmarks[RIGHT_HIP_IDX, 0]) / 2.0
+    hip_center_y = (current_landmarks[LEFT_HIP_IDX, 1] + current_landmarks[RIGHT_HIP_IDX, 1]) / 2.0
+    hip_center_z = (current_landmarks[LEFT_HIP_IDX, 2] + current_landmarks[RIGHT_HIP_IDX, 2]) / 2.0
 
-    frame[:, 0] -= hip_center_x
-    frame[:, 1] -= hip_center_y
-    frame[:, 2] -= hip_center_z
+    # Chuẩn hóa x, y, z theo tâm hông
+    current_landmarks[:, 0] -= hip_center_x
+    current_landmarks[:, 1] -= hip_center_y
+    current_landmarks[:, 2] -= hip_center_z
 
-    return frame.reshape(-1).tolist()
+    frame_features = []
+
+    for i, lm in enumerate(current_landmarks):
+        x, y, z, visibility = lm
+
+        if prev_landmarks is None:
+            vx, vy, vz = 0.0, 0.0, 0.0
+        else:
+            prev_x, prev_y, prev_z, _ = prev_landmarks[i]
+            vx = x - prev_x
+            vy = y - prev_y
+            vz = z - prev_z
+
+        frame_features.extend([x, y, z, visibility, vx, vy, vz])
+
+    return frame_features, current_landmarks
 
 
 def draw_landmark_on_image(results, img):
@@ -87,15 +106,18 @@ def draw_class_on_image(label_text, conf_text, img):
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     if label_text == "FALL":
-        action_color = (0, 0, 255)
+        action_color = (0, 0, 255)      # đỏ
     elif label_text == "BOXING":
-        action_color = (255, 0, 0)
+        action_color = (255, 0, 0)      # xanh dương
+    elif label_text == "ADL":
+        action_color = (0, 255, 0)      # xanh lá
+    elif label_text == "HAND_WAVING":
+        action_color = (0, 165, 255)    # cam
     else:
-        action_color = (0, 255, 0)
+        action_color = (255, 255, 255)  # trắng
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    #cv2.putText(img, "Press 'q' to quit", (10, 100), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     return img
 
@@ -106,10 +128,10 @@ def draw_datetime_on_image(img):
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.7
     thickness = 2
-    text_color = (255, 255, 255)  # trắng
+    text_color = (255, 255, 255)
     padding = 10
 
-    (text_width, text_height), baseline = cv2.getTextSize(
+    (text_width, text_height), _ = cv2.getTextSize(
         current_time, font, font_scale, thickness
     )
 
@@ -200,7 +222,7 @@ while True:
     if frame_count > warmup_frames and results.pose_landmarks:
         img = draw_landmark_on_image(results, img)
 
-        c_lm = make_landmark_timestep(results)
+        c_lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
         lm_list.append(c_lm)
 
         if len(lm_list) > NO_OF_TIMESTEPS:
@@ -211,6 +233,7 @@ while True:
     else:
         pred_history.clear()
         lm_list.clear()
+        prev_landmarks = None
         if frame_count > warmup_frames:
             label = "No pose detected"
             confidence_text = "0.00"

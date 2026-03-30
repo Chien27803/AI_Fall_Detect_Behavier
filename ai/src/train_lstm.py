@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report
 
 DATASET_DIR = Path("dataset")
-NO_OF_TIMESTEPS = 30
+NO_OF_TIMESTEPS = 35
 NUM_FEATURES = 231   # 33 landmarks * 7 features = [x, y, z, visibility, vx, vy, vz]
 LEARNING_RATE = 0.0005
 EPOCHS = 15
@@ -20,7 +20,9 @@ BATCH_SIZE = 16
 
 LABEL_MAP = {
     "ADL": 0,
-    "FALL": 1
+    "BOXING": 1,
+    "FALL": 2,
+    "HAND_WAVING": 3
 }
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]

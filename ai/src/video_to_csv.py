@@ -10,8 +10,8 @@ BASE_DIR = SRC_DIR.parent
 VIDEO_DIR = BASE_DIR / "data" / "raw"
 
 # chọn subject muốn convert
-SUBJECTS_TO_PROCESS = ["subject4"]   # đổi thành ["subject1"] khi làm train
-OUTPUT_SUBFOLDER = "train_s4"            # đổi thành "train" khi làm train
+SUBJECTS_TO_PROCESS = ["subject4"]
+OUTPUT_SUBFOLDER = "train_s4"
 
 OUTPUT_DIR = SRC_DIR / "dataset" / OUTPUT_SUBFOLDER
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -23,11 +23,31 @@ mp_pose = mp.solutions.pose
 pose = mp_pose.Pose()
 
 
-def make_landmark_timestep(results):
-    c_lm = []
+def extract_current_landmarks(results):
+    coords = []
     for lm in results.pose_landmarks.landmark:
-        c_lm.extend([lm.x, lm.y, lm.z, lm.visibility])
-    return c_lm
+        coords.append([lm.x, lm.y, lm.z, lm.visibility])
+    return coords
+
+
+def make_landmark_timestep(results, prev_landmarks=None):
+    current_landmarks = extract_current_landmarks(results)
+    c_lm = []
+
+    for i, lm in enumerate(current_landmarks):
+        x, y, z, visibility = lm
+
+        if prev_landmarks is None:
+            vx, vy, vz = 0.0, 0.0, 0.0
+        else:
+            prev_x, prev_y, prev_z, _ = prev_landmarks[i]
+            vx = x - prev_x
+            vy = y - prev_y
+            vz = z - prev_z
+
+        c_lm.extend([x, y, z, visibility, vx, vy, vz])
+
+    return c_lm, current_landmarks
 
 
 def extract_label_from_path(video_path: Path):
@@ -54,6 +74,7 @@ def extract_video_to_csv(video_path: Path):
     lm_list = []
     total_frames = 0
     valid_frames = 0
+    prev_landmarks = None
 
     while True:
         ret, frame = cap.read()
@@ -65,7 +86,7 @@ def extract_video_to_csv(video_path: Path):
         results = pose.process(frame_rgb)
 
         if results.pose_landmarks:
-            lm = make_landmark_timestep(results)
+            lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
             lm_list.append(lm)
             valid_frames += 1
 

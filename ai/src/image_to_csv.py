@@ -22,11 +22,31 @@ mp_pose = mp.solutions.pose
 pose = mp_pose.Pose()
 
 
-def make_landmark_timestep(results):
-    c_lm = []
+def extract_current_landmarks(results):
+    coords = []
     for lm in results.pose_landmarks.landmark:
-        c_lm.extend([lm.x, lm.y, lm.z, lm.visibility])
-    return c_lm
+        coords.append([lm.x, lm.y, lm.z, lm.visibility])
+    return coords
+
+
+def make_landmark_timestep(results, prev_landmarks=None):
+    current_landmarks = extract_current_landmarks(results)
+    c_lm = []
+
+    for i, lm in enumerate(current_landmarks):
+        x, y, z, visibility = lm
+
+        if prev_landmarks is None:
+            vx, vy, vz = 0.0, 0.0, 0.0
+        else:
+            prev_x, prev_y, prev_z, _ = prev_landmarks[i]
+            vx = x - prev_x
+            vy = y - prev_y
+            vz = z - prev_z
+
+        c_lm.extend([x, y, z, visibility, vx, vy, vz])
+
+    return c_lm, current_landmarks
 
 
 def get_sorted_image_files(folder_path: Path):
@@ -48,6 +68,7 @@ def extract_image_folder_to_csv(image_folder: Path):
     lm_list = []
     total_frames = 0
     valid_frames = 0
+    prev_landmarks = None
 
     for image_path in image_files:
         frame = cv2.imread(str(image_path))
@@ -59,7 +80,7 @@ def extract_image_folder_to_csv(image_folder: Path):
         results = pose.process(frame_rgb)
 
         if results.pose_landmarks:
-            lm = make_landmark_timestep(results)
+            lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
             lm_list.append(lm)
             valid_frames += 1
 

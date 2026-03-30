@@ -13,15 +13,14 @@ from sklearn.metrics import confusion_matrix, classification_report
 
 DATASET_DIR = Path("dataset")
 NO_OF_TIMESTEPS = 30
-NUM_FEATURES = 132
+NUM_FEATURES = 231   # 33 landmarks * 7 features = [x, y, z, visibility, vx, vy, vz]
 LEARNING_RATE = 0.0005
 EPOCHS = 15
 BATCH_SIZE = 16
 
 LABEL_MAP = {
     "ADL": 0,
-    "BOXING": 1,
-    "FALL": 2,
+    "FALL": 1
 }
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]
@@ -37,26 +36,35 @@ def get_label_from_filename(file_path: Path):
 
 def convert_to_relative_coordinates(sequence: np.ndarray) -> np.ndarray:
     """
-    Chuyển toàn bộ frame từ tọa độ tuyệt đối sang tọa độ tương đối.
-    Gốc tọa độ = trung điểm của left_hip (23) và right_hip (24).
+    Chuẩn hóa tọa độ tuyệt đối sang tọa độ tương đối theo tâm hông.
+    Mỗi landmark có 7 giá trị:
+        [x, y, z, visibility, vx, vy, vz]
+
+    Chỉ chuẩn hóa phần:
+        x, y, z
+
+    Giữ nguyên:
+        visibility, vx, vy, vz
 
     Input:
-        sequence shape = (n_frames, 132)
+        sequence shape = (n_frames, 231)
     Output:
-        sequence shape = (n_frames, 132)
+        sequence shape = (n_frames, 231)
     """
     relative_sequence = sequence.copy().astype(np.float32)
 
     LEFT_HIP_IDX = 23
     RIGHT_HIP_IDX = 24
+    FEATURES_PER_LANDMARK = 7
 
     for i in range(relative_sequence.shape[0]):
-        frame = relative_sequence[i].reshape(33, 4)
+        frame = relative_sequence[i].reshape(33, FEATURES_PER_LANDMARK)
 
         hip_center_x = (frame[LEFT_HIP_IDX, 0] + frame[RIGHT_HIP_IDX, 0]) / 2.0
         hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
         hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
 
+        # Chỉ trừ trên x, y, z
         frame[:, 0] -= hip_center_x
         frame[:, 1] -= hip_center_y
         frame[:, 2] -= hip_center_z
@@ -202,11 +210,11 @@ num_classes = len(CLASS_NAMES)
 model = Sequential([
     Input(shape=(NO_OF_TIMESTEPS, NUM_FEATURES)),
     LSTM(64, return_sequences=True),
-    Dropout(0.2),
+    Dropout(0.3),
     LSTM(64),
-    Dropout(0.2),
+    Dropout(0.3),
     Dense(32, activation="relu"),
-    Dropout(0.2),
+    Dropout(0.3),
     Dense(num_classes, activation="softmax")
 ])
 

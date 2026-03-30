@@ -95,7 +95,7 @@ def draw_class_on_image(label_text, conf_text, img):
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(img, "Press 'q' to quit", (10, 100), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    #cv2.putText(img, "Press 'q' to quit", (10, 100), font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     return img
 

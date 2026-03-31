@@ -7,6 +7,8 @@ from datetime import datetime
 import pygame
 import os
 import sys
+import time
+import requests
 
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
@@ -23,12 +25,28 @@ FALL_HISTORY_TRIGGER = 3
 
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
+# ====== TELEGRAM CONFIG ======
+TELEGRAM_ENABLED = True
+TELEGRAM_BOT_TOKEN = "8639607585:AAG7_lj5qkPOE6jarwBZOADdtZjzkLJX7XQ"
+TELEGRAM_CHAT_ID = "8697469060"
+FALL_CONFIRM_SECONDS = 5.0
+TELEGRAM_TIMEOUT = (3, 10)
+
 label = "Warmup..."
 confidence_text = ""
 
 pred_history = deque(maxlen=PRED_HISTORY_SIZE)
 fall_history = deque(maxlen=PRED_HISTORY_SIZE)
 alarm_playing = False
+
+# ====== FALL EVENT STATE ======
+# Mỗi lần label chuyển sang FALL -> tạo 1 event mới
+# Giữ FALL đủ 5 giây -> gửi đúng 1 lần
+# Vẫn FALL thêm 10s, 20s -> không gửi thêm
+# Chỉ khi thoát FALL rồi quay lại FALL -> event mới
+fall_event_active = False
+fall_event_start_time = None
+fall_event_sent = False
 
 # ====== PATHS ======
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -206,6 +224,94 @@ def handle_alarm():
         stop_alarm()
 
 
+def send_telegram_photo(frame, caption):
+    if not TELEGRAM_ENABLED:
+        return False
+
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "8639607585:AAG7_lj5qkPOE6jarwBZOADdtZjzkLJX7XQ":
+        print("Chưa cấu hình TELEGRAM_BOT_TOKEN")
+        return False
+
+    if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "8697469060":
+        print("Chưa cấu hình TELEGRAM_CHAT_ID")
+        return False
+
+    success, buffer = cv2.imencode(".jpg", frame)
+    if not success:
+        print("Không encode được ảnh để gửi Telegram")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+
+    files = {
+        "photo": ("fall_alert.jpg", buffer.tobytes(), "image/jpeg")
+    }
+
+    data = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": caption
+    }
+
+    try:
+        response = requests.post(
+            url,
+            data=data,
+            files=files,
+            timeout=TELEGRAM_TIMEOUT
+        )
+
+        print("Status code:", response.status_code)
+        print("Response text:", response.text)
+
+        response.raise_for_status()
+
+        payload = response.json()
+        if not payload.get("ok", False):
+            print(f"Telegram API trả về lỗi: {payload}")
+            return False
+
+        print("Đã gửi cảnh báo FALL lên Telegram")
+        return True
+
+    except requests.RequestException as e:
+        print(f"Lỗi gửi Telegram: {e}")
+        return False
+
+
+def handle_telegram_fall_alert(frame_to_send):
+    global fall_event_active, fall_event_start_time, fall_event_sent
+
+    now = time.monotonic()
+
+    # Khi label chuyển sang FALL => bắt đầu 1 event mới
+    if label == "FALL":
+        if not fall_event_active:
+            fall_event_active = True
+            fall_event_start_time = now
+            fall_event_sent = False
+
+        fall_duration = now - fall_event_start_time
+
+        # Chỉ gửi 1 lần cho mỗi event FALL
+        if fall_duration >= FALL_CONFIRM_SECONDS and not fall_event_sent:
+            event_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            caption = (
+                "⚠️ CẢNH BÁO TÉ NGÃ\n"
+                f"Thời gian: {event_time}\n"
+                f"Nhãn: {label}\n"
+                f"Confidence: {confidence_text}\n"
+                f"FALL liên tục: {fall_duration:.1f}s"
+            )
+
+            if send_telegram_photo(frame_to_send, caption):
+                fall_event_sent = True
+    else:
+        # Khi label không còn là FALL => kết thúc event
+        fall_event_active = False
+        fall_event_start_time = None
+        fall_event_sent = False
+
+
 def detect(model, lm_list):
     global label, confidence_text
 
@@ -231,7 +337,6 @@ def detect(model, lm_list):
 
     raw_label = CLASS_NAMES[class_id]
 
-    # ngưỡng riêng cho FALL
     if raw_label == "FALL":
         is_confident = confidence >= FALL_THRESHOLD
     else:
@@ -244,7 +349,6 @@ def detect(model, lm_list):
     else:
         label = "Uncertain"
 
-    # lịch sử FALL để bật còi chắc hơn
     if raw_label == "FALL" and confidence >= FALL_THRESHOLD:
         fall_history.append(1)
     else:
@@ -279,13 +383,22 @@ while True:
         fall_history.clear()
         lm_list.clear()
         prev_landmarks = None
+
+        fall_event_active = False
+        fall_event_start_time = None
+        fall_event_sent = False
+
         if frame_count > warmup_frames:
             label = "No pose detected"
             confidence_text = "0.00"
 
     img = draw_class_on_image(label, confidence_text, img)
     img = draw_datetime_on_image(img)
+
+    frame_to_send = img.copy()
+
     handle_alarm()
+    handle_telegram_fall_alert(frame_to_send)
 
     cv2.imshow("LSTM Action Recognition", img)
 

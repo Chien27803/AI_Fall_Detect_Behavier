@@ -2,6 +2,9 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import tensorflow as tf
+import requests
+import time
+import threading
 from collections import deque, Counter
 from datetime import datetime
 import pygame
@@ -12,15 +15,29 @@ import sys
 MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 35
 NUM_FEATURES = 231
-CLASS_NAMES = ["ADL", "BOXING", "FALL","HAND_WAVING"]
+CLASS_NAMES = ["ADL", "BOXING", "FALL", "HAND_WAVING"]
 CONFIDENCE_THRESHOLD = 0.7
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
+
+# ====== TELEGRAM CONFIG ======
+TELEGRAM_ENABLED = True
+TELEGRAM_BOT_TOKEN = "8639607585:AAG7_lj5qkPOE6jarwBZOADdtZjzkLJX7XQ"
+TELEGRAM_CHAT_ID = "8697469060"
+TELEGRAM_TIMEOUT = (3, 10)
+FALL_CONFIRM_SECONDS = 5.0
+FALL_END_GRACE_SECONDS = 1.5
 
 label = "Warmup..."
 confidence_text = ""
 
 pred_history = deque(maxlen=5)
 alarm_playing = False
+
+# Trạng thái sự kiện FALL cho Telegram
+fall_event_active = False
+fall_event_start_time = None
+fall_event_sent = False
+fall_last_fall_time = None
 
 # lấy đường dẫn tuyệt đối của file âm thanh theo thư mục file .py
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,15 +81,22 @@ def extract_current_landmarks(results):
     return np.array(coords, dtype=np.float32)  # shape (33, 4)
 
 
+
 def make_landmark_timestep(results, prev_landmarks=None):
     current_landmarks = extract_current_landmarks(results)  # (33, 4)
 
     LEFT_HIP_IDX = 23
     RIGHT_HIP_IDX = 24
 
-    hip_center_x = (current_landmarks[LEFT_HIP_IDX, 0] + current_landmarks[RIGHT_HIP_IDX, 0]) / 2.0
-    hip_center_y = (current_landmarks[LEFT_HIP_IDX, 1] + current_landmarks[RIGHT_HIP_IDX, 1]) / 2.0
-    hip_center_z = (current_landmarks[LEFT_HIP_IDX, 2] + current_landmarks[RIGHT_HIP_IDX, 2]) / 2.0
+    hip_center_x = (
+        current_landmarks[LEFT_HIP_IDX, 0] + current_landmarks[RIGHT_HIP_IDX, 0]
+    ) / 2.0
+    hip_center_y = (
+        current_landmarks[LEFT_HIP_IDX, 1] + current_landmarks[RIGHT_HIP_IDX, 1]
+    ) / 2.0
+    hip_center_z = (
+        current_landmarks[LEFT_HIP_IDX, 2] + current_landmarks[RIGHT_HIP_IDX, 2]
+    ) / 2.0
 
     # Chuẩn hóa x, y, z theo tâm hông
     current_landmarks[:, 0] -= hip_center_x
@@ -97,9 +121,11 @@ def make_landmark_timestep(results, prev_landmarks=None):
     return frame_features, current_landmarks
 
 
+
 def draw_landmark_on_image(results, img):
     mpDraw.draw_landmarks(img, results.pose_landmarks, mpPose.POSE_CONNECTIONS)
     return img
+
 
 
 def draw_class_on_image(label_text, conf_text, img):
@@ -120,6 +146,7 @@ def draw_class_on_image(label_text, conf_text, img):
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
     return img
+
 
 
 def draw_datetime_on_image(img):
@@ -152,6 +179,7 @@ def draw_datetime_on_image(img):
     return img
 
 
+
 def start_alarm():
     global alarm_playing
     if not alarm_playing:
@@ -162,6 +190,7 @@ def start_alarm():
             print(f"Không phát được âm thanh: {e}")
 
 
+
 def stop_alarm():
     global alarm_playing
     if alarm_playing:
@@ -169,11 +198,114 @@ def stop_alarm():
         alarm_playing = False
 
 
+
 def handle_alarm(current_label):
     if current_label == "FALL":
         start_alarm()
     else:
         stop_alarm()
+
+
+
+def send_telegram_photo(frame, caption):
+    if not TELEGRAM_ENABLED:
+        return False
+
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
+        print("Chưa cấu hình TELEGRAM_BOT_TOKEN")
+        return False
+
+    if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "YOUR_CHAT_ID":
+        print("Chưa cấu hình TELEGRAM_CHAT_ID")
+        return False
+
+    success, buffer = cv2.imencode(".jpg", frame)
+    if not success:
+        print("Không encode được ảnh để gửi Telegram")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    files = {
+        "photo": ("fall_alert.jpg", buffer.tobytes(), "image/jpeg")
+    }
+    data = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": caption
+    }
+
+    try:
+        response = requests.post(
+            url,
+            data=data,
+            files=files,
+            timeout=TELEGRAM_TIMEOUT
+        )
+        print("Telegram status:", response.status_code)
+        print("Telegram response:", response.text)
+        response.raise_for_status()
+
+        payload = response.json()
+        if not payload.get("ok", False):
+            print(f"Telegram API trả về lỗi: {payload}")
+            return False
+
+        print("Đã gửi ảnh cảnh báo FALL lên Telegram")
+        return True
+    except requests.RequestException as e:
+        print(f"Lỗi gửi Telegram: {e}")
+        return False
+
+
+
+def send_telegram_photo_async(frame, caption):
+    frame_copy = frame.copy()
+
+    def worker():
+        send_telegram_photo(frame_copy, caption)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return True
+
+
+
+def handle_telegram_fall_alert(current_label, frame):
+    global fall_event_active, fall_event_start_time, fall_event_sent, fall_last_fall_time
+
+    now = time.monotonic()
+
+    if current_label == "FALL":
+        fall_last_fall_time = now
+
+        if not fall_event_active:
+            fall_event_active = True
+            fall_event_start_time = now
+            fall_event_sent = False
+            print("Bắt đầu sự kiện FALL, đang đếm 5 giây...")
+
+        fall_duration = now - fall_event_start_time
+
+        if not fall_event_sent and fall_duration >= FALL_CONFIRM_SECONDS:
+            caption = (
+                "⚠️ CẢNH BÁO TÉ NGÃ\n"
+                f"Thời gian: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
+                f"Nhãn: {current_label}\n"
+                f"Confidence: {confidence_text}\n"
+                f"FALL liên tục: {fall_duration:.1f}s"
+            )
+
+            if send_telegram_photo_async(frame, caption):
+                fall_event_sent = True
+                print("Đã kích hoạt gửi ảnh Telegram ở luồng nền")
+    else:
+        if fall_event_active and fall_last_fall_time is not None:
+            time_since_last_fall = now - fall_last_fall_time
+            if time_since_last_fall >= FALL_END_GRACE_SECONDS:
+                print("Sự kiện FALL đã kết thúc, reset trạng thái Telegram")
+                fall_event_active = False
+                fall_event_start_time = None
+                fall_event_sent = False
+                fall_last_fall_time = None
+
 
 
 def detect(model, lm_list):
@@ -209,45 +341,47 @@ def detect(model, lm_list):
     confidence_text = f"{confidence:.2f}"
 
 
-while True:
-    success, img = cap.read()
-    if not success:
-        continue
+try:
+    while True:
+        success, img = cap.read()
+        if not success:
+            continue
 
-    frame_count += 1
+        frame_count += 1
 
-    imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = pose.process(imgRGB)
+        imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = pose.process(imgRGB)
 
-    if frame_count > warmup_frames and results.pose_landmarks:
-        img = draw_landmark_on_image(results, img)
+        if frame_count > warmup_frames and results.pose_landmarks:
+            img = draw_landmark_on_image(results, img)
 
-        c_lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
-        lm_list.append(c_lm)
+            c_lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
+            lm_list.append(c_lm)
 
-        if len(lm_list) > NO_OF_TIMESTEPS:
-            lm_list.pop(0)
+            if len(lm_list) > NO_OF_TIMESTEPS:
+                lm_list.pop(0)
 
-        if len(lm_list) == NO_OF_TIMESTEPS:
-            detect(model, lm_list)
-    else:
-        pred_history.clear()
-        lm_list.clear()
-        prev_landmarks = None
-        if frame_count > warmup_frames:
-            label = "No pose detected"
-            confidence_text = "0.00"
+            if len(lm_list) == NO_OF_TIMESTEPS:
+                detect(model, lm_list)
+        else:
+            pred_history.clear()
+            lm_list.clear()
+            prev_landmarks = None
+            if frame_count > warmup_frames:
+                label = "No pose detected"
+                confidence_text = "0.00"
 
-    img = draw_class_on_image(label, confidence_text, img)
-    img = draw_datetime_on_image(img)
-    handle_alarm(label)
+        img = draw_class_on_image(label, confidence_text, img)
+        img = draw_datetime_on_image(img)
+        handle_alarm(label)
+        handle_telegram_fall_alert(label, img)
 
-    cv2.imshow("LSTM Action Recognition", img)
+        cv2.imshow("LSTM Action Recognition", img)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-stop_alarm()
-cap.release()
-cv2.destroyAllWindows()
-pygame.mixer.quit()
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+finally:
+    stop_alarm()
+    cap.release()
+    cv2.destroyAllWindows()
+    pygame.mixer.quit()

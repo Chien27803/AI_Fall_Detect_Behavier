@@ -10,24 +10,46 @@ import sys
 
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
+SCALER_PATH = "feature_scaler.npz"
 NO_OF_TIMESTEPS = 35
 NUM_FEATURES = 231
-CLASS_NAMES = ["ADL", "BOXING", "FALL","HAND_WAVING"]
-CONFIDENCE_THRESHOLD = 0.7
+CLASS_NAMES = ["ADL", "BOXING", "FALL", "HAND_WAVING"]
+
+CONFIDENCE_THRESHOLD = 0.70
+FALL_THRESHOLD = 0.80
+
+PRED_HISTORY_SIZE = 5
+FALL_HISTORY_TRIGGER = 3
+
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
 label = "Warmup..."
 confidence_text = ""
 
-pred_history = deque(maxlen=5)
+pred_history = deque(maxlen=PRED_HISTORY_SIZE)
+fall_history = deque(maxlen=PRED_HISTORY_SIZE)
 alarm_playing = False
 
-# lấy đường dẫn tuyệt đối của file âm thanh theo thư mục file .py
+# ====== PATHS ======
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ALARM_PATH = os.path.join(BASE_DIR, ALARM_FILE)
+MODEL_FULL_PATH = os.path.join(BASE_DIR, MODEL_PATH)
+SCALER_FULL_PATH = os.path.join(BASE_DIR, SCALER_PATH)
 
-# ====== LOAD MODEL ======
-model = tf.keras.models.load_model(MODEL_PATH)
+# ====== LOAD MODEL + SCALER ======
+try:
+    model = tf.keras.models.load_model(MODEL_FULL_PATH)
+
+    if not os.path.exists(SCALER_FULL_PATH):
+        print(f"Không tìm thấy file scaler: {SCALER_FULL_PATH}")
+        sys.exit()
+
+    scaler_data = np.load(SCALER_FULL_PATH)
+    feature_mean = scaler_data["mean"].astype(np.float32)
+    feature_std = scaler_data["std"].astype(np.float32)
+except Exception as e:
+    print(f"Lỗi load model/scaler: {e}")
+    sys.exit()
 
 # ====== INIT AUDIO ======
 try:
@@ -48,7 +70,13 @@ if not cap.isOpened():
 
 # ====== MEDIAPIPE ======
 mpPose = mp.solutions.pose
-pose = mpPose.Pose()
+pose = mpPose.Pose(
+    static_image_mode=False,
+    model_complexity=1,
+    smooth_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 mpDraw = mp.solutions.drawing_utils
 
 lm_list = []
@@ -61,11 +89,11 @@ def extract_current_landmarks(results):
     coords = []
     for lm in results.pose_landmarks.landmark:
         coords.append([lm.x, lm.y, lm.z, lm.visibility])
-    return np.array(coords, dtype=np.float32)  # shape (33, 4)
+    return np.array(coords, dtype=np.float32)
 
 
 def make_landmark_timestep(results, prev_landmarks=None):
-    current_landmarks = extract_current_landmarks(results)  # (33, 4)
+    current_landmarks = extract_current_landmarks(results)
 
     LEFT_HIP_IDX = 23
     RIGHT_HIP_IDX = 24
@@ -74,7 +102,6 @@ def make_landmark_timestep(results, prev_landmarks=None):
     hip_center_y = (current_landmarks[LEFT_HIP_IDX, 1] + current_landmarks[RIGHT_HIP_IDX, 1]) / 2.0
     hip_center_z = (current_landmarks[LEFT_HIP_IDX, 2] + current_landmarks[RIGHT_HIP_IDX, 2]) / 2.0
 
-    # Chuẩn hóa x, y, z theo tâm hông
     current_landmarks[:, 0] -= hip_center_x
     current_landmarks[:, 1] -= hip_center_y
     current_landmarks[:, 2] -= hip_center_z
@@ -106,15 +133,17 @@ def draw_class_on_image(label_text, conf_text, img):
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     if label_text == "FALL":
-        action_color = (0, 0, 255)      # đỏ
+        action_color = (0, 0, 255)
     elif label_text == "BOXING":
-        action_color = (255, 0, 0)      # xanh dương
+        action_color = (255, 0, 0)
     elif label_text == "ADL":
-        action_color = (0, 255, 0)      # xanh lá
+        action_color = (0, 255, 0)
     elif label_text == "HAND_WAVING":
-        action_color = (0, 165, 255)    # cam
+        action_color = (0, 165, 255)
+    elif label_text == "Uncertain":
+        action_color = (0, 255, 255)
     else:
-        action_color = (255, 255, 255)  # trắng
+        action_color = (255, 255, 255)
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
@@ -131,10 +160,7 @@ def draw_datetime_on_image(img):
     text_color = (255, 255, 255)
     padding = 10
 
-    (text_width, text_height), _ = cv2.getTextSize(
-        current_time, font, font_scale, thickness
-    )
-
+    (text_width, _), _ = cv2.getTextSize(current_time, font, font_scale, thickness)
     x = img.shape[1] - text_width - padding
     y = 30
 
@@ -169,8 +195,12 @@ def stop_alarm():
         alarm_playing = False
 
 
-def handle_alarm(current_label):
-    if current_label == "FALL":
+def should_trigger_fall_alarm():
+    return sum(fall_history) >= FALL_HISTORY_TRIGGER
+
+
+def handle_alarm():
+    if should_trigger_fall_alarm():
         start_alarm()
     else:
         stop_alarm()
@@ -186,6 +216,7 @@ def detect(model, lm_list):
         confidence_text = "0.00"
         return
 
+    lm_array = (lm_array - feature_mean) / feature_std
     lm_array = np.expand_dims(lm_array, axis=0)
 
     preds = model.predict(lm_array, verbose=0)[0]
@@ -195,17 +226,30 @@ def detect(model, lm_list):
     if class_id >= len(CLASS_NAMES):
         label = "Unknown"
         confidence_text = f"{confidence:.2f}"
+        fall_history.append(0)
         return
 
-    if confidence < CONFIDENCE_THRESHOLD:
-        current_label = "Uncertain"
+    raw_label = CLASS_NAMES[class_id]
+
+    # ngưỡng riêng cho FALL
+    if raw_label == "FALL":
+        is_confident = confidence >= FALL_THRESHOLD
     else:
-        current_label = CLASS_NAMES[class_id]
+        is_confident = confidence >= CONFIDENCE_THRESHOLD
 
-    pred_history.append(current_label)
-    smoothed_label = Counter(pred_history).most_common(1)[0][0]
+    if is_confident:
+        pred_history.append(raw_label)
+        stable_label = Counter(pred_history).most_common(1)[0][0]
+        label = stable_label
+    else:
+        label = "Uncertain"
 
-    label = smoothed_label
+    # lịch sử FALL để bật còi chắc hơn
+    if raw_label == "FALL" and confidence >= FALL_THRESHOLD:
+        fall_history.append(1)
+    else:
+        fall_history.append(0)
+
     confidence_text = f"{confidence:.2f}"
 
 
@@ -232,6 +276,7 @@ while True:
             detect(model, lm_list)
     else:
         pred_history.clear()
+        fall_history.clear()
         lm_list.clear()
         prev_landmarks = None
         if frame_count > warmup_frames:
@@ -240,7 +285,7 @@ while True:
 
     img = draw_class_on_image(label, confidence_text, img)
     img = draw_datetime_on_image(img)
-    handle_alarm(label)
+    handle_alarm()
 
     cv2.imshow("LSTM Action Recognition", img)
 

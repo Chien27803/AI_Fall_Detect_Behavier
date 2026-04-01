@@ -27,6 +27,19 @@ LABEL_MAP = {
 
 CLASS_NAMES = [name for name, _ in sorted(LABEL_MAP.items(), key=lambda x: x[1])]
 
+LEFT_HIP_IDX = 23
+RIGHT_HIP_IDX = 24
+NUM_LANDMARKS = 33
+FEATURES_PER_LANDMARK = 7
+
+X_IDX = 0
+Y_IDX = 1
+Z_IDX = 2
+VIS_IDX = 3
+VX_IDX = 4
+VY_IDX = 5
+VZ_IDX = 6
+
 
 def get_label_from_filename(file_path: Path):
     file_name = file_path.stem.upper()
@@ -38,42 +51,47 @@ def get_label_from_filename(file_path: Path):
 
 def convert_to_relative_coordinates(sequence: np.ndarray) -> np.ndarray:
     """
-    Chuẩn hóa tọa độ tuyệt đối sang tọa độ tương đối theo tâm hông.
-    Mỗi landmark có 7 giá trị:
-        [x, y, z, visibility, vx, vy, vz]
+    Chuyển sequence từ:
+        [x, y, z, visibility, vx, vy, vz] tuyệt đối
+    thành:
+        [x_rel, y_rel, z_rel, visibility, vx_rel, vy_rel, vz_rel]
 
-    Chỉ chuẩn hóa phần:
-        x, y, z
-
-    Giữ nguyên:
-        visibility, vx, vy, vz
-
-    Input:
-        sequence shape = (n_frames, 231)
-    Output:
-        sequence shape = (n_frames, 231)
+    Các bước:
+    1) Chuẩn hóa x, y, z theo tâm hông của từng frame
+    2) Tính lại vx, vy, vz từ tọa độ tương đối giữa 2 frame liên tiếp
+    3) Frame đầu tiên sẽ có vx = vy = vz = 0
     """
-    relative_sequence = sequence.copy().astype(np.float32)
+    sequence = np.asarray(sequence, dtype=np.float32)
 
-    LEFT_HIP_IDX = 23
-    RIGHT_HIP_IDX = 24
-    FEATURES_PER_LANDMARK = 7
+    if sequence.ndim != 2 or sequence.shape[1] != NUM_FEATURES:
+        raise ValueError(
+            f"Sequence phải có shape (n_frames, {NUM_FEATURES}), "
+            f"nhưng nhận được {sequence.shape}"
+        )
 
-    for i in range(relative_sequence.shape[0]):
-        frame = relative_sequence[i].reshape(33, FEATURES_PER_LANDMARK)
+    frames = sequence.reshape(-1, NUM_LANDMARKS, FEATURES_PER_LANDMARK).copy()
 
-        hip_center_x = (frame[LEFT_HIP_IDX, 0] + frame[RIGHT_HIP_IDX, 0]) / 2.0
-        hip_center_y = (frame[LEFT_HIP_IDX, 1] + frame[RIGHT_HIP_IDX, 1]) / 2.0
-        hip_center_z = (frame[LEFT_HIP_IDX, 2] + frame[RIGHT_HIP_IDX, 2]) / 2.0
+    # ===== 1. Chuyển x, y, z sang tương đối theo tâm hông =====
+    for i in range(frames.shape[0]):
+        left_hip = frames[i, LEFT_HIP_IDX, [X_IDX, Y_IDX, Z_IDX]]
+        right_hip = frames[i, RIGHT_HIP_IDX, [X_IDX, Y_IDX, Z_IDX]]
+        hip_center = (left_hip + right_hip) / 2.0
 
-        # Chỉ trừ trên x, y, z
-        frame[:, 0] -= hip_center_x
-        frame[:, 1] -= hip_center_y
-        frame[:, 2] -= hip_center_z
+        frames[i, :, X_IDX] -= hip_center[0]
+        frames[i, :, Y_IDX] -= hip_center[1]
+        frames[i, :, Z_IDX] -= hip_center[2]
 
-        relative_sequence[i] = frame.reshape(-1)
+    # ===== 2. Tính lại vx, vy, vz trên hệ tọa độ tương đối =====
+    frames[:, :, VX_IDX] = 0.0
+    frames[:, :, VY_IDX] = 0.0
+    frames[:, :, VZ_IDX] = 0.0
 
-    return relative_sequence
+    for i in range(1, frames.shape[0]):
+        frames[i, :, VX_IDX] = frames[i, :, X_IDX] - frames[i - 1, :, X_IDX]
+        frames[i, :, VY_IDX] = frames[i, :, Y_IDX] - frames[i - 1, :, Y_IDX]
+        frames[i, :, VZ_IDX] = frames[i, :, Z_IDX] - frames[i - 1, :, Z_IDX]
+
+    return frames.reshape(-1, NUM_FEATURES)
 
 
 def load_csv_file(file_path: Path):
@@ -99,7 +117,12 @@ def load_csv_file(file_path: Path):
         )
         return None
 
-    data = convert_to_relative_coordinates(data)
+    try:
+        data = convert_to_relative_coordinates(data)
+    except Exception as e:
+        print(f"[BỎ QUA] {file_path.name} lỗi khi chuẩn hóa dữ liệu: {e}")
+        return None
+
     return data
 
 

@@ -11,9 +11,11 @@ import pygame
 import os
 import sys
 from dotenv import load_dotenv
+
 # ====== LOAD BIẾN MÔI TRƯỜNG ======
 # Tự động tìm file .env ở cùng thư mục với file script này
 load_dotenv()
+
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 35
@@ -21,6 +23,9 @@ NUM_FEATURES = 231
 CLASS_NAMES = ["ADL", "BOXING", "FALL", "HAND_WAVING"]
 CONFIDENCE_THRESHOLD = 0.7
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
+
+# Chỉ predict mỗi 2 frame
+PREDICT_EVERY_N_FRAMES = 2
 
 # ====== TELEGRAM CONFIG ======
 TELEGRAM_ENABLED = True
@@ -35,6 +40,14 @@ confidence_text = ""
 
 pred_history = deque(maxlen=5)
 alarm_playing = False
+
+# ====== FPS CONFIG ======
+fps_history = deque(maxlen=30)   # làm mượt FPS trong 30 frame gần nhất
+runtime_start_time = time.perf_counter()
+prev_frame_time = None
+display_fps = 0.0
+avg_fps = 0.0
+processed_frame_count = 0
 
 # Trạng thái sự kiện FALL cho Telegram
 fall_event_active = False
@@ -66,6 +79,9 @@ if not cap.isOpened():
     print("Không mở được webcam")
     sys.exit()
 
+# Có thể bật nếu muốn thử giảm độ trễ camera
+# cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 # ====== MEDIAPIPE ======
 mpPose = mp.solutions.pose
 pose = mpPose.Pose()
@@ -82,7 +98,6 @@ def extract_current_landmarks(results):
     for lm in results.pose_landmarks.landmark:
         coords.append([lm.x, lm.y, lm.z, lm.visibility])
     return np.array(coords, dtype=np.float32)  # shape (33, 4)
-
 
 
 def make_landmark_timestep(results, prev_landmarks=None):
@@ -124,11 +139,9 @@ def make_landmark_timestep(results, prev_landmarks=None):
     return frame_features, current_landmarks
 
 
-
 def draw_landmark_on_image(results, img):
     mpDraw.draw_landmarks(img, results.pose_landmarks, mpPose.POSE_CONNECTIONS)
     return img
-
 
 
 def draw_class_on_image(label_text, conf_text, img):
@@ -149,7 +162,6 @@ def draw_class_on_image(label_text, conf_text, img):
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
     return img
-
 
 
 def draw_datetime_on_image(img):
@@ -182,6 +194,53 @@ def draw_datetime_on_image(img):
     return img
 
 
+def draw_fps_on_image(img, fps, avg_fps):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    cv2.putText(
+        img,
+        f"FPS: {fps:.1f}",
+        (10, img.shape[0] - 40),
+        font,
+        0.7,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        img,
+        f"AVG FPS: {avg_fps:.1f}",
+        (10, img.shape[0] - 10),
+        font,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    return img
+
+
+def update_fps():
+    global prev_frame_time, display_fps, avg_fps, processed_frame_count
+
+    current_time = time.perf_counter()
+    processed_frame_count += 1
+
+    if prev_frame_time is not None:
+        delta = current_time - prev_frame_time
+        if delta > 0:
+            instant_fps = 1.0 / delta
+            fps_history.append(instant_fps)
+            display_fps = sum(fps_history) / len(fps_history)
+
+    prev_frame_time = current_time
+
+    elapsed = current_time - runtime_start_time
+    if elapsed > 0:
+        avg_fps = processed_frame_count / elapsed
+
 
 def start_alarm():
     global alarm_playing
@@ -193,7 +252,6 @@ def start_alarm():
             print(f"Không phát được âm thanh: {e}")
 
 
-
 def stop_alarm():
     global alarm_playing
     if alarm_playing:
@@ -201,13 +259,11 @@ def stop_alarm():
         alarm_playing = False
 
 
-
 def handle_alarm(current_label):
     if current_label == "FALL":
         start_alarm()
     else:
         stop_alarm()
-
 
 
 def send_telegram_photo(frame, caption):
@@ -259,7 +315,6 @@ def send_telegram_photo(frame, caption):
         return False
 
 
-
 def send_telegram_photo_async(frame, caption):
     frame_copy = frame.copy()
 
@@ -268,7 +323,6 @@ def send_telegram_photo_async(frame, caption):
 
     threading.Thread(target=worker, daemon=True).start()
     return True
-
 
 
 def handle_telegram_fall_alert(current_label, frame):
@@ -310,7 +364,6 @@ def handle_telegram_fall_alert(current_label, frame):
                 fall_last_fall_time = None
 
 
-
 def detect(model, lm_list):
     global label, confidence_text
 
@@ -350,6 +403,7 @@ try:
         if not success:
             continue
 
+        update_fps()
         frame_count += 1
 
         imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -364,7 +418,8 @@ try:
             if len(lm_list) > NO_OF_TIMESTEPS:
                 lm_list.pop(0)
 
-            if len(lm_list) == NO_OF_TIMESTEPS:
+            # Chỉ predict mỗi 2 frame sau khi đã đủ dữ liệu
+            if len(lm_list) == NO_OF_TIMESTEPS and frame_count % PREDICT_EVERY_N_FRAMES == 0:
                 detect(model, lm_list)
         else:
             pred_history.clear()
@@ -376,6 +431,8 @@ try:
 
         img = draw_class_on_image(label, confidence_text, img)
         img = draw_datetime_on_image(img)
+        img = draw_fps_on_image(img, display_fps, avg_fps)
+
         handle_alarm(label)
         handle_telegram_fall_alert(label, img)
 

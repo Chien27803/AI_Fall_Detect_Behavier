@@ -10,7 +10,10 @@ from datetime import datetime
 import pygame
 import os
 import sys
-
+from dotenv import load_dotenv
+# ====== LOAD BIẾN MÔI TRƯỜNG ======
+# Tự động tìm file .env ở cùng thư mục với file script này
+load_dotenv()
 # ====== CONFIG ======
 MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 35
@@ -21,8 +24,8 @@ ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
 # ====== TELEGRAM CONFIG ======
 TELEGRAM_ENABLED = True
-TELEGRAM_BOT_TOKEN = "8639607585:AAG7_lj5qkPOE6jarwBZOADdtZjzkLJX7XQ"
-TELEGRAM_CHAT_ID = "8697469060"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_TIMEOUT = (3, 10)
 FALL_CONFIRM_SECONDS = 5.0
 FALL_END_GRACE_SECONDS = 1.5

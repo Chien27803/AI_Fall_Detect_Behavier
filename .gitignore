@@ -9,5 +9,5 @@ ai/data/raw/
 ai/data/processed/
 ai/data/sequences/
 ai/models/
-.env
+**/.env
 .DS_Store

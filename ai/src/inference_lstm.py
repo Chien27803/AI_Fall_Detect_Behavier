@@ -28,7 +28,7 @@ ALARM_FILE = "tieng-coi-canh-bao.mp3"
 PREDICT_EVERY_N_FRAMES = 2
 
 # ====== TELEGRAM CONFIG ======
-TELEGRAM_ENABLED = True
+TELEGRAM_ENABLED = False # True 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_TIMEOUT = (3, 10)
@@ -37,6 +37,9 @@ FALL_END_GRACE_SECONDS = 1.5
 
 label = "Warmup..."
 confidence_text = ""
+#test .env
+print("BOT:", TELEGRAM_BOT_TOKEN)
+print("CHAT_ID:", TELEGRAM_CHAT_ID)
 
 pred_history = deque(maxlen=5)
 alarm_playing = False

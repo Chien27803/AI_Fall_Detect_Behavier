@@ -278,8 +278,7 @@ history = model.fit(
     callbacks=[checkpoint, early_stopping]
 )
 
-# Lưu model ở epoch cuối cùng
-model.save("final_model.keras")
+
 
 # ===== 8. Load best model để đánh giá =====
 best_model = tf.keras.models.load_model("best_model.keras")
@@ -305,5 +304,5 @@ print(cm_df)
 print("\n===== CLASSIFICATION REPORT =====")
 print(classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4))
 
-print("\nĐã lưu best_model.keras và final_model.keras")
+print("\nĐã lưu best_model.keras")
 print("Class names:", CLASS_NAMES)

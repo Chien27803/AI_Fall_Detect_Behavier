@@ -21,7 +21,7 @@ MODEL_PATH = "best_model.keras"
 NO_OF_TIMESTEPS = 35
 NUM_FEATURES = 231
 CLASS_NAMES = ["ADL", "BOXING", "FALL", "HAND_WAVING"]
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.8
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
 
 # Chỉ predict mỗi 2 frame

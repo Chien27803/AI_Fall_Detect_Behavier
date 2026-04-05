@@ -19,7 +19,7 @@ EPOCHS = 15
 BATCH_SIZE = 16
 
 LABEL_MAP = {
-    "ADL": 0,
+    "ADL": 0, 
     "BOXING": 1,
     "FALL": 2,
     "HAND_WAVING": 3

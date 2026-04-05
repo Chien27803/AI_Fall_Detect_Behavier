@@ -27,8 +27,8 @@ ALARM_FILE = "tieng-coi-canh-bao.mp3"
 # Chỉ predict mỗi 2 frame
 PREDICT_EVERY_N_FRAMES = 2
 
-# ====== TELEGRAM CONFIG ======
-TELEGRAM_ENABLED = False # True 
+# ====== TELEGRAM CONFIG ====== 
+TELEGRAM_ENABLED =   False # True
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_TIMEOUT = (3, 10)
@@ -107,7 +107,7 @@ def make_landmark_timestep(results, prev_landmarks=None):
     current_landmarks = extract_current_landmarks(results)  # (33, 4)
 
     LEFT_HIP_IDX = 23
-    RIGHT_HIP_IDX = 24
+    RIGHT_HIP_IDX = 24 
 
     hip_center_x = (
         current_landmarks[LEFT_HIP_IDX, 0] + current_landmarks[RIGHT_HIP_IDX, 0]

@@ -12,23 +12,34 @@ import os
 import sys
 from dotenv import load_dotenv
 
+# ====== BASE DIR ======
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ====== LOAD BIẾN MÔI TRƯỜNG ======
-# Tự động tìm file .env ở cùng thư mục với file script này
-load_dotenv()
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # ====== CONFIG ======
-MODEL_PATH = "best_model.keras"
+MODEL_PATH = os.path.join(BASE_DIR, "best_model.keras")
 NO_OF_TIMESTEPS = 35
 NUM_FEATURES = 231
 CLASS_NAMES = ["ADL", "BOXING", "FALL", "HAND_WAVING"]
-CONFIDENCE_THRESHOLD = 0.8
+
+# giảm nhẹ để bắt FALL nhạy hơn
+CONFIDENCE_THRESHOLD = 0.75
+
 ALARM_FILE = "tieng-coi-canh-bao.mp3"
+ALARM_PATH = os.path.join(BASE_DIR, ALARM_FILE)
 
 # Chỉ predict mỗi 2 frame
 PREDICT_EVERY_N_FRAMES = 2
 
-# ====== TELEGRAM CONFIG ====== 
-TELEGRAM_ENABLED =   False # True
+# ====== VISIBILITY FILTER ======
+# Nếu visibility trung bình của 33 landmark thấp hơn ngưỡng này
+# thì bỏ qua frame đó, không đưa vào lm_list
+MIN_VISIBILITY_MEAN = 0.35
+
+# ====== TELEGRAM CONFIG ======
+TELEGRAM_ENABLED = False  # True
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_TIMEOUT = (3, 10)
@@ -37,6 +48,7 @@ FALL_END_GRACE_SECONDS = 1.5
 
 label = "Warmup..."
 confidence_text = ""
+
 #test .env
 print("BOT:", TELEGRAM_BOT_TOKEN)
 print("CHAT_ID:", TELEGRAM_CHAT_ID)
@@ -45,25 +57,29 @@ pred_history = deque(maxlen=5)
 alarm_playing = False
 
 # ====== FPS CONFIG ======
-fps_history = deque(maxlen=30)   # làm mượt FPS trong 30 frame gần nhất
+fps_history = deque(maxlen=30)
 runtime_start_time = time.perf_counter()
 prev_frame_time = None
 display_fps = 0.0
 avg_fps = 0.0
 processed_frame_count = 0
 
-# Trạng thái sự kiện FALL cho Telegram
+# ====== FALL EVENT STATE FOR TELEGRAM ======
 fall_event_active = False
 fall_event_start_time = None
 fall_event_sent = False
 fall_last_fall_time = None
 
-# lấy đường dẫn tuyệt đối của file âm thanh theo thư mục file .py
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ALARM_PATH = os.path.join(BASE_DIR, ALARM_FILE)
-
 # ====== LOAD MODEL ======
-model = tf.keras.models.load_model(MODEL_PATH)
+if not os.path.exists(MODEL_PATH):
+    print(f"Không tìm thấy model: {MODEL_PATH}")
+    sys.exit()
+
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+except Exception as e:
+    print(f"Lỗi load model: {e}")
+    sys.exit()
 
 # ====== INIT AUDIO ======
 try:
@@ -82,12 +98,15 @@ if not cap.isOpened():
     print("Không mở được webcam")
     sys.exit()
 
-# Có thể bật nếu muốn thử giảm độ trễ camera
-# cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
 # ====== MEDIAPIPE ======
 mpPose = mp.solutions.pose
-pose = mpPose.Pose()
+pose = mpPose.Pose(
+    static_image_mode=False,
+    model_complexity=1,
+    smooth_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 mpDraw = mp.solutions.drawing_utils
 
 lm_list = []
@@ -103,11 +122,27 @@ def extract_current_landmarks(results):
     return np.array(coords, dtype=np.float32)  # shape (33, 4)
 
 
+def is_frame_visibility_valid(current_landmarks: np.ndarray) -> bool:
+    """
+    current_landmarks shape: (33, 4)
+    cột thứ 4 là visibility
+    """
+    if current_landmarks is None or current_landmarks.shape != (33, 4):
+        return False
+
+    visibility_mean = float(np.mean(current_landmarks[:, 3]))
+    return visibility_mean >= MIN_VISIBILITY_MEAN
+
+
 def make_landmark_timestep(results, prev_landmarks=None):
     current_landmarks = extract_current_landmarks(results)  # (33, 4)
 
+    # ===== LỌC FRAME THEO VISIBILITY =====
+    if not is_frame_visibility_valid(current_landmarks):
+        return None, prev_landmarks
+
     LEFT_HIP_IDX = 23
-    RIGHT_HIP_IDX = 24 
+    RIGHT_HIP_IDX = 24
 
     hip_center_x = (
         current_landmarks[LEFT_HIP_IDX, 0] + current_landmarks[RIGHT_HIP_IDX, 0]
@@ -151,15 +186,17 @@ def draw_class_on_image(label_text, conf_text, img):
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     if label_text == "FALL":
-        action_color = (0, 0, 255)      # đỏ
+        action_color = (0, 0, 255)
     elif label_text == "BOXING":
-        action_color = (255, 0, 0)      # xanh dương
+        action_color = (255, 0, 0)
     elif label_text == "ADL":
-        action_color = (0, 255, 0)      # xanh lá
+        action_color = (0, 255, 0)
     elif label_text == "HAND_WAVING":
-        action_color = (0, 165, 255)    # cam
+        action_color = (0, 165, 255)
+    elif label_text == "Low visibility":
+        action_color = (0, 255, 255)
     else:
-        action_color = (255, 255, 255)  # trắng
+        action_color = (255, 255, 255)
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
     cv2.putText(img, f"Confidence: {conf_text}", (10, 65), font, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
@@ -415,15 +452,23 @@ try:
         if frame_count > warmup_frames and results.pose_landmarks:
             img = draw_landmark_on_image(results, img)
 
-            c_lm, prev_landmarks = make_landmark_timestep(results, prev_landmarks)
-            lm_list.append(c_lm)
+            c_lm, new_prev_landmarks = make_landmark_timestep(results, prev_landmarks)
 
-            if len(lm_list) > NO_OF_TIMESTEPS:
-                lm_list.pop(0)
+            # chỉ thêm vào sequence nếu frame đủ chất lượng
+            if c_lm is not None:
+                prev_landmarks = new_prev_landmarks
+                lm_list.append(c_lm)
 
-            # Chỉ predict mỗi 2 frame sau khi đã đủ dữ liệu
-            if len(lm_list) == NO_OF_TIMESTEPS and frame_count % PREDICT_EVERY_N_FRAMES == 0:
-                detect(model, lm_list)
+                if len(lm_list) > NO_OF_TIMESTEPS:
+                    lm_list.pop(0)
+
+                if len(lm_list) == NO_OF_TIMESTEPS and frame_count % PREDICT_EVERY_N_FRAMES == 0:
+                    detect(model, lm_list)
+            else:
+                if frame_count > warmup_frames:
+                    label = "Low visibility"
+                    confidence_text = "0.00"
+
         else:
             pred_history.clear()
             lm_list.clear()

@@ -19,7 +19,7 @@ EPOCHS = 15
 BATCH_SIZE = 16
 
 LABEL_MAP = {
-    "ADL": 0, 
+    "ADL": 0,
     "BOXING": 1,
     "FALL": 2,
     "HAND_WAVING": 3
@@ -39,6 +39,21 @@ VIS_IDX = 3
 VX_IDX = 4
 VY_IDX = 5
 VZ_IDX = 6
+
+# ===== CLEANING SETTINGS =====
+MIN_FRAME_VISIBILITY_MEAN = 0.35     # frame có visibility trung bình thấp hơn ngưỡng này sẽ bị loại
+MIN_VALID_FRAME_RATIO = 0.60         # sau khi lọc, file phải còn ít nhất 60% số frame ban đầu
+MAX_MISSING_RATIO_PER_ROW = 0.30     # 1 dòng bị thiếu quá 30% giá trị thì loại
+EPS = 1e-6
+
+# ===== CLASS WEIGHT SETTINGS =====
+# Tăng trọng số cho FALL để mô hình ưu tiên học lớp té ngã hơn
+CLASS_WEIGHT = {
+    0: 1.0,   # ADL
+    1: 1.0,   # BOXING
+    2: 1.4,   # FALL
+    3: 1.0    # HAND_WAVING
+}
 
 
 def get_label_from_filename(file_path: Path):
@@ -94,22 +109,123 @@ def convert_to_relative_coordinates(sequence: np.ndarray) -> np.ndarray:
     return frames.reshape(-1, NUM_FEATURES)
 
 
-def load_csv_file(file_path: Path):
-    df = pd.read_csv(file_path)
+def clean_dataframe(df: pd.DataFrame, file_path: Path):
+    """
+    Làm sạch DataFrame:
+    - bỏ cột index rác
+    - ép kiểu số
+    - thay inf -> NaN
+    - loại dòng rỗng / dòng lỗi nặng
+    - nội suy NaN
+    """
+    original_rows = len(df)
 
-    # Nếu cột đầu là index thì bỏ đi
+    # ===== 1. Bỏ cột index rác nếu có =====
     if df.shape[1] == NUM_FEATURES + 1:
-        data = df.iloc[:, 1:].values
-    else:
-        data = df.values
+        first_col_name = str(df.columns[0]).strip().lower()
+        if first_col_name.startswith("unnamed") or first_col_name in ["index", "frame"]:
+            df = df.iloc[:, 1:]
+        else:
+            # nếu dư đúng 1 cột thì vẫn bỏ cột đầu
+            df = df.iloc[:, 1:]
 
-    if data.shape[1] != NUM_FEATURES:
+    # ===== 2. Kiểm tra số cột =====
+    if df.shape[1] != NUM_FEATURES:
         print(
-            f"[BỎ QUA] {file_path.name} có {data.shape[1]} features, "
+            f"[BỎ QUA] {file_path.name} có {df.shape[1]} features, "
             f"cần đúng {NUM_FEATURES} features"
+        )
+        return None, None
+
+    # ===== 3. Ép toàn bộ sang số =====
+    df = df.apply(pd.to_numeric, errors="coerce")
+
+    # ===== 4. Thay inf/-inf thành NaN =====
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # ===== 5. Bỏ dòng rỗng hoàn toàn =====
+    df = df.dropna(how="all")
+
+    if len(df) == 0:
+        print(f"[BỎ QUA] {file_path.name} không còn dữ liệu sau khi bỏ dòng rỗng")
+        return None, None
+
+    # ===== 6. Bỏ dòng bị thiếu quá nhiều =====
+    row_missing_ratio = df.isna().mean(axis=1)
+    df = df.loc[row_missing_ratio <= MAX_MISSING_RATIO_PER_ROW].copy()
+
+    if len(df) == 0:
+        print(f"[BỎ QUA] {file_path.name} toàn bộ frame bị lỗi nặng")
+        return None, None
+
+    # ===== 7. Nội suy dữ liệu thiếu =====
+    df = df.interpolate(method="linear", limit_direction="both")
+    df = df.ffill().bfill()
+
+    # ===== 8. Kiểm tra lại =====
+    if df.isnull().values.any():
+        print(f"[BỎ QUA] {file_path.name} vẫn còn NaN sau khi làm sạch")
+        return None, None
+
+    return df, original_rows
+
+
+def filter_low_visibility_frames(data: np.ndarray, file_path: Path, original_rows: int):
+    """
+    Lọc frame có chất lượng thấp dựa trên visibility trung bình của 33 landmarks.
+    """
+    if data.ndim != 2 or data.shape[1] != NUM_FEATURES:
+        print(f"[BỎ QUA] {file_path.name} shape không hợp lệ trước bước lọc visibility: {data.shape}")
+        return None
+
+    frames = data.reshape(-1, NUM_LANDMARKS, FEATURES_PER_LANDMARK)
+
+    visibility_values = frames[:, :, VIS_IDX]
+    frame_visibility_mean = np.mean(visibility_values, axis=1)
+
+    valid_mask = frame_visibility_mean >= MIN_FRAME_VISIBILITY_MEAN
+    filtered_frames = frames[valid_mask]
+
+    kept_count = filtered_frames.shape[0]
+    kept_ratio = kept_count / max(original_rows, 1)
+
+    if kept_count < NO_OF_TIMESTEPS:
+        print(
+            f"[BỎ QUA] {file_path.name} sau lọc visibility chỉ còn {kept_count} frame, "
+            f"ít hơn NO_OF_TIMESTEPS={NO_OF_TIMESTEPS}"
         )
         return None
 
+    if kept_ratio < MIN_VALID_FRAME_RATIO:
+        print(
+            f"[BỎ QUA] {file_path.name} chỉ giữ được {kept_count}/{original_rows} frame "
+            f"({kept_ratio:.2%}), dưới ngưỡng {MIN_VALID_FRAME_RATIO:.0%}"
+        )
+        return None
+
+    return filtered_frames.reshape(-1, NUM_FEATURES).astype(np.float32)
+
+
+def load_csv_file(file_path: Path):
+    try:
+        df = pd.read_csv(file_path)
+    except Exception as e:
+        print(f"[BỎ QUA] Không đọc được file {file_path.name}: {e}")
+        return None
+
+    # ===== 1. Làm sạch DataFrame =====
+    cleaned_df, original_rows = clean_dataframe(df, file_path)
+    if cleaned_df is None:
+        return None
+
+    # ===== 2. Chuyển sang numpy =====
+    try:
+        data = cleaned_df.to_numpy(dtype=np.float32)
+    except Exception as e:
+        print(f"[BỎ QUA] {file_path.name} lỗi khi chuyển sang numpy float32: {e}")
+        return None
+
+    # ===== 3. Kiểm tra số frame trước khi lọc visibility =====
     if data.shape[0] < NO_OF_TIMESTEPS:
         print(
             f"[BỎ QUA] {file_path.name} có {data.shape[0]} frame, "
@@ -117,6 +233,12 @@ def load_csv_file(file_path: Path):
         )
         return None
 
+    # ===== 4. Lọc frame chất lượng thấp theo visibility =====
+    data = filter_low_visibility_frames(data, file_path, original_rows)
+    if data is None:
+        return None
+
+    # ===== 5. Chuẩn hóa sang tọa độ tương đối =====
     try:
         data = convert_to_relative_coordinates(data)
     except Exception as e:
@@ -229,6 +351,10 @@ print("X_test shape:", X_test.shape)
 print("y_test shape:", y_test.shape)
 print(f"Learning rate: {LEARNING_RATE}")
 
+print("\n===== CLASS WEIGHT =====")
+for class_id, class_name in enumerate(CLASS_NAMES):
+    print(f"{class_name}: {CLASS_WEIGHT[class_id]}")
+
 num_classes = len(CLASS_NAMES)
 
 # ===== 5. Build model =====
@@ -275,10 +401,9 @@ history = model.fit(
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
     validation_data=(X_test, y_test),
-    callbacks=[checkpoint, early_stopping]
+    callbacks=[checkpoint, early_stopping],
+    class_weight=CLASS_WEIGHT
 )
-
-
 
 # ===== 8. Load best model để đánh giá =====
 best_model = tf.keras.models.load_model("best_model.keras")

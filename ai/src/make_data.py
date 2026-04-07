@@ -5,11 +5,11 @@ import os
 
 # ====== CONFIG ======
 label = "ADL"   # đổi label khi thu hành động khác
-subject_name = "subject7"
+subject_name = "subject6"
 no_of_frames = 210      # số frame cho 1 sample (chuẩn LSTM)
 
 base_save_path = "dataset"
-subfolder_name = "train_s7"
+subfolder_name = "train_s6"
 save_path = os.path.join(base_save_path, subfolder_name)
 
 os.makedirs(save_path, exist_ok=True)

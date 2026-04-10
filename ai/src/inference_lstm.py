@@ -38,6 +38,29 @@ PREDICT_EVERY_N_FRAMES = 2
 # thì bỏ qua frame đó, không đưa vào lm_list
 MIN_VISIBILITY_MEAN = 0.35
 
+# ====== FALL ENTRY FILTER CONFIG ======
+# Model đoán FALL vẫn chưa đủ.
+# Chỉ khi hình học landmark cho thấy người đang ở tư thế nằm / đổ ngang rõ ràng
+# thì mới cho vào trạng thái FALL.
+FALL_POSTURE_VISIBILITY_THRESHOLD = 0.50
+LYING_TORSO_ANGLE_MAX = 35.0
+LYING_BODY_AXIS_ANGLE_MAX = 40.0
+LYING_SHOULDER_HIP_Y_MAX = 0.10
+LYING_HIP_KNEE_Y_MAX = 0.12
+LYING_KNEE_ANKLE_Y_MAX = 0.14
+LYING_HORIZONTAL_RATIO_MIN = 1.20
+
+# ====== FALL HOLD / RECOVERY CONFIG ======
+# Khi đã vào FALL thì CHỈ thoát khi người đó đứng thẳng dậy rõ ràng.
+# Ngồi dậy, chống tay dậy, quỳ, nửa ngồi nửa đứng... vẫn tiếp tục giữ FALL.
+RECOVERY_CONSEC_FRAMES = 10
+RECOVERY_VISIBILITY_THRESHOLD = 0.50
+TORSO_UPRIGHT_ANGLE_MIN = 50.0
+HEAD_HIP_Y_MARGIN = 0.03
+SHOULDER_HIP_Y_MARGIN = 0.02
+STAND_HIP_KNEE_MARGIN = 0.08
+STAND_KNEE_ANKLE_MARGIN = 0.04
+
 # ====== TELEGRAM CONFIG ======
 TELEGRAM_ENABLED = False  # True
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -47,9 +70,10 @@ FALL_CONFIRM_SECONDS = 5.0
 FALL_END_GRACE_SECONDS = 1.5
 
 label = "Warmup..."
+model_label = "Warmup..."
 confidence_text = ""
 
-#test .env
+# test .env
 print("BOT:", TELEGRAM_BOT_TOKEN)
 print("CHAT_ID:", TELEGRAM_CHAT_ID)
 
@@ -69,6 +93,10 @@ fall_event_active = False
 fall_event_start_time = None
 fall_event_sent = False
 fall_last_fall_time = None
+
+# ====== FALL HOLD STATE ======
+fall_latched = False
+recovery_frame_count = 0
 
 # ====== LOAD MODEL ======
 if not os.path.exists(MODEL_PATH):
@@ -134,6 +162,178 @@ def is_frame_visibility_valid(current_landmarks: np.ndarray) -> bool:
     return visibility_mean >= MIN_VISIBILITY_MEAN
 
 
+def get_fall_entry_posture(raw_landmarks: np.ndarray) -> str:
+    """
+    Chỉ dùng để xác nhận có cho phép BẮT ĐẦU FALL hay không.
+
+    Trả về:
+    - 'lying'            : người đang nằm / đổ ngang đủ rõ để cho vào FALL
+    - 'not_lying'        : chưa đủ dấu hiệu nằm, không cho vào FALL
+    - 'unknown'          : landmark kém tin cậy, chưa kết luận
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return "unknown"
+
+    important_idxs = [0, 11, 12, 23, 24, 25, 26, 27, 28]
+    important_visibility = float(np.mean(raw_landmarks[important_idxs, 3]))
+    if important_visibility < FALL_POSTURE_VISIBILITY_THRESHOLD:
+        return "unknown"
+
+    nose = raw_landmarks[0, :3]
+    left_shoulder = raw_landmarks[11, :3]
+    right_shoulder = raw_landmarks[12, :3]
+    left_hip = raw_landmarks[23, :3]
+    right_hip = raw_landmarks[24, :3]
+    left_knee = raw_landmarks[25, :3]
+    right_knee = raw_landmarks[26, :3]
+    left_ankle = raw_landmarks[27, :3]
+    right_ankle = raw_landmarks[28, :3]
+
+    shoulder_center = (left_shoulder + right_shoulder) / 2.0
+    hip_center = (left_hip + right_hip) / 2.0
+    knee_center = (left_knee + right_knee) / 2.0
+    ankle_center = (left_ankle + right_ankle) / 2.0
+
+    torso_dx = float(shoulder_center[0] - hip_center[0])
+    torso_dy = float(shoulder_center[1] - hip_center[1])
+    torso_angle_deg = float(np.degrees(np.arctan2(abs(torso_dy), abs(torso_dx) + 1e-6)))
+
+    body_dx = float(ankle_center[0] - shoulder_center[0])
+    body_dy = float(ankle_center[1] - shoulder_center[1])
+    body_axis_angle_deg = float(np.degrees(np.arctan2(abs(body_dy), abs(body_dx) + 1e-6)))
+
+    shoulder_hip_same_level = abs(float(shoulder_center[1] - hip_center[1])) <= LYING_SHOULDER_HIP_Y_MAX
+    hip_knee_same_level = abs(float(hip_center[1] - knee_center[1])) <= LYING_HIP_KNEE_Y_MAX
+    knee_ankle_same_level = abs(float(knee_center[1] - ankle_center[1])) <= LYING_KNEE_ANKLE_Y_MAX
+
+    body_points = np.array([
+        nose[:2],
+        shoulder_center[:2],
+        hip_center[:2],
+        knee_center[:2],
+        ankle_center[:2],
+    ], dtype=np.float32)
+
+    vertical_span = float(np.max(body_points[:, 1]) - np.min(body_points[:, 1]))
+    horizontal_span = float(np.max(body_points[:, 0]) - np.min(body_points[:, 0]))
+    horizontal_dominant = horizontal_span >= (vertical_span * LYING_HORIZONTAL_RATIO_MIN)
+
+    lying = (
+        torso_angle_deg <= LYING_TORSO_ANGLE_MAX
+        and body_axis_angle_deg <= LYING_BODY_AXIS_ANGLE_MAX
+        and shoulder_hip_same_level
+        and hip_knee_same_level
+        and knee_ankle_same_level
+        and horizontal_dominant
+    )
+
+    if lying:
+        return "lying"
+    return "not_lying"
+
+
+def get_recovery_posture(raw_landmarks: np.ndarray) -> str:
+    """
+    Chỉ dùng để quyết định khi nào được thoát khỏi trạng thái FALL.
+
+    Nguyên tắc:
+    - CHỈ khi người dùng đứng thẳng rõ ràng mới được coi là recovered.
+    - Nếu mới ngồi dậy, quỳ, chống tay, nửa ngồi nửa đứng... => vẫn là FALL.
+
+    Trả về một trong các giá trị:
+    - 'standing'
+    - 'not_recovered'
+    - 'unknown'
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return "unknown"
+
+    important_idxs = [0, 11, 12, 23, 24, 25, 26, 27, 28]
+    important_visibility = float(np.mean(raw_landmarks[important_idxs, 3]))
+    if important_visibility < RECOVERY_VISIBILITY_THRESHOLD:
+        return "unknown"
+
+    nose = raw_landmarks[0, :3]
+    left_shoulder = raw_landmarks[11, :3]
+    right_shoulder = raw_landmarks[12, :3]
+    left_hip = raw_landmarks[23, :3]
+    right_hip = raw_landmarks[24, :3]
+    left_knee = raw_landmarks[25, :3]
+    right_knee = raw_landmarks[26, :3]
+    left_ankle = raw_landmarks[27, :3]
+    right_ankle = raw_landmarks[28, :3]
+
+    shoulder_center = (left_shoulder + right_shoulder) / 2.0
+    hip_center = (left_hip + right_hip) / 2.0
+    knee_center = (left_knee + right_knee) / 2.0
+    ankle_center = (left_ankle + right_ankle) / 2.0
+
+    torso_dx = float(shoulder_center[0] - hip_center[0])
+    torso_dy = float(shoulder_center[1] - hip_center[1])
+    torso_angle_deg = float(np.degrees(np.arctan2(abs(torso_dy), abs(torso_dx) + 1e-6)))
+
+    # Trong ảnh: y càng nhỏ thì điểm càng ở cao hơn
+    head_above_hip = nose[1] < (hip_center[1] - HEAD_HIP_Y_MARGIN)
+    shoulders_above_hip = shoulder_center[1] < (hip_center[1] - SHOULDER_HIP_Y_MARGIN)
+    torso_upright = torso_angle_deg >= TORSO_UPRIGHT_ANGLE_MIN
+
+    hips_above_knees = hip_center[1] < (knee_center[1] - STAND_HIP_KNEE_MARGIN)
+    knees_above_ankles = knee_center[1] < (ankle_center[1] - STAND_KNEE_ANKLE_MARGIN)
+
+    standing = (
+        torso_upright
+        and head_above_hip
+        and shoulders_above_hip
+        and hips_above_knees
+        and knees_above_ankles
+    )
+
+    if standing:
+        return "standing"
+    return "not_recovered"
+
+
+def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
+    """
+    Chỉ can thiệp riêng cho FALL:
+    - Nếu model đoán FALL nhưng người KHÔNG ở tư thế nằm => chưa cho vào FALL
+    - Nếu đã vào FALL => GIỮ FALL cho đến khi người dùng đứng thẳng dậy liên tiếp
+    - Ngồi dậy KHÔNG được thoát FALL
+    """
+    global fall_latched, recovery_frame_count
+
+    if not fall_latched:
+        if current_model_label == "FALL":
+            fall_posture = get_fall_entry_posture(raw_landmarks)
+
+            if fall_posture == "lying":
+                fall_latched = True
+                recovery_frame_count = 0
+                return "FALL"
+
+            # Model đoán FALL nhưng chưa thấy người nằm rõ ràng
+            return "Uncertain"
+
+        return current_model_label
+
+    posture = get_recovery_posture(raw_landmarks)
+
+    # CHỈ chấp nhận standing là recovered
+    if posture == "standing":
+        recovery_frame_count += 1
+    else:
+        recovery_frame_count = 0
+        return "FALL"
+
+    if recovery_frame_count >= RECOVERY_CONSEC_FRAMES:
+        fall_latched = False
+        recovery_frame_count = 0
+        pred_history.clear()  # giảm nguy cơ model bị trễ vài frame rồi vào FALL lại ngay
+        return "ADL"
+
+    return "FALL"
+
+
 def make_landmark_timestep(results, prev_landmarks=None):
     current_landmarks = extract_current_landmarks(results)  # (33, 4)
 
@@ -195,6 +395,8 @@ def draw_class_on_image(label_text, conf_text, img):
         action_color = (0, 165, 255)
     elif label_text == "Low visibility":
         action_color = (0, 255, 255)
+    elif label_text == "Uncertain":
+        action_color = (255, 255, 0)
     else:
         action_color = (255, 255, 255)
 
@@ -405,12 +607,12 @@ def handle_telegram_fall_alert(current_label, frame):
 
 
 def detect(model, lm_list):
-    global label, confidence_text
+    global model_label, confidence_text
 
     lm_array = np.array(lm_list, dtype=np.float32)
 
     if lm_array.shape != (NO_OF_TIMESTEPS, NUM_FEATURES):
-        label = "Invalid input"
+        model_label = "Invalid input"
         confidence_text = "0.00"
         return
 
@@ -421,7 +623,7 @@ def detect(model, lm_list):
     confidence = float(preds[class_id])
 
     if class_id >= len(CLASS_NAMES):
-        label = "Unknown"
+        model_label = "Unknown"
         confidence_text = f"{confidence:.2f}"
         return
 
@@ -433,7 +635,7 @@ def detect(model, lm_list):
     pred_history.append(current_label)
     smoothed_label = Counter(pred_history).most_common(1)[0][0]
 
-    label = smoothed_label
+    model_label = smoothed_label
     confidence_text = f"{confidence:.2f}"
 
 
@@ -452,6 +654,7 @@ try:
         if frame_count > warmup_frames and results.pose_landmarks:
             img = draw_landmark_on_image(results, img)
 
+            raw_landmarks = extract_current_landmarks(results)
             c_lm, new_prev_landmarks = make_landmark_timestep(results, prev_landmarks)
 
             # chỉ thêm vào sequence nếu frame đủ chất lượng
@@ -460,12 +663,16 @@ try:
                 lm_list.append(c_lm)
 
                 if len(lm_list) > NO_OF_TIMESTEPS:
-                    lm_list.pop(0)
+                    lm_list.pop(0)  
 
                 if len(lm_list) == NO_OF_TIMESTEPS and frame_count % PREDICT_EVERY_N_FRAMES == 0:
                     detect(model, lm_list)
+
+                label = apply_fall_hold(model_label, raw_landmarks)
             else:
-                if frame_count > warmup_frames:
+                if fall_latched:
+                    label = "FALL"
+                else:
                     label = "Low visibility"
                     confidence_text = "0.00"
 
@@ -473,9 +680,13 @@ try:
             pred_history.clear()
             lm_list.clear()
             prev_landmarks = None
+
             if frame_count > warmup_frames:
-                label = "No pose detected"
-                confidence_text = "0.00"
+                if fall_latched:
+                    label = "FALL"
+                else:
+                    label = "No pose detected"
+                    confidence_text = "0.00"
 
         img = draw_class_on_image(label, confidence_text, img)
         img = draw_datetime_on_image(img)

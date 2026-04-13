@@ -41,7 +41,7 @@ MIN_VISIBILITY_MEAN = 0.35
 # ====== FALL ENTRY FILTER CONFIG ======
 # Model đoán FALL vẫn chưa đủ.
 # Chỉ khi hình học landmark cho thấy người đang ở tư thế nằm / đổ ngang rõ ràng
-# thì mới cho vào trạng thái FALL.
+# thì mới xem xét cho vào trạng thái FALL.
 FALL_POSTURE_VISIBILITY_THRESHOLD = 0.50
 LYING_TORSO_ANGLE_MAX = 35.0
 LYING_BODY_AXIS_ANGLE_MAX = 40.0
@@ -49,6 +49,16 @@ LYING_SHOULDER_HIP_Y_MAX = 0.10
 LYING_HIP_KNEE_Y_MAX = 0.12
 LYING_KNEE_ANKLE_Y_MAX = 0.14
 LYING_HORIZONTAL_RATIO_MIN = 1.20
+
+# ====== RECENT FALL TRANSITION CONFIG ======
+# Điều kiện vào FALL mới:
+# - model đoán FALL
+# - trong khoảng 1-2 giây gần đây, vai có chuyển từ cao xuống thấp rõ rệt
+# Lưu ý: trên ảnh, trục y tăng nghĩa là điểm bị hạ thấp xuống.
+SHOULDER_HISTORY_MAXLEN = 120
+RECENT_SHOULDER_DROP_SECONDS = 1.5
+SHOULDER_DROP_Y_THRESHOLD = 0.16
+MIN_SHOULDER_VISIBILITY = 0.50
 
 # ====== FALL HOLD / RECOVERY CONFIG ======
 # Khi đã vào FALL thì CHỈ thoát khi người đó đứng thẳng dậy rõ ràng.
@@ -97,6 +107,9 @@ fall_last_fall_time = None
 # ====== FALL HOLD STATE ======
 fall_latched = False
 recovery_frame_count = 0
+
+# ====== RECENT MOTION CONTEXT ======
+shoulder_y_history = deque(maxlen=SHOULDER_HISTORY_MAXLEN)
 
 # ====== LOAD MODEL ======
 if not os.path.exists(MODEL_PATH):
@@ -167,8 +180,8 @@ def get_fall_entry_posture(raw_landmarks: np.ndarray) -> str:
     Chỉ dùng để xác nhận có cho phép BẮT ĐẦU FALL hay không.
 
     Trả về:
-    - 'lying'            : người đang nằm / đổ ngang đủ rõ để cho vào FALL
-    - 'not_lying'        : chưa đủ dấu hiệu nằm, không cho vào FALL
+    - 'lying'            : người đang nằm / đổ ngang đủ rõ để xét vào FALL
+    - 'not_lying'        : chưa đủ dấu hiệu nằm
     - 'unknown'          : landmark kém tin cậy, chưa kết luận
     """
     if raw_landmarks is None or raw_landmarks.shape != (33, 4):
@@ -293,10 +306,65 @@ def get_recovery_posture(raw_landmarks: np.ndarray) -> str:
     return "not_recovered"
 
 
+def reset_motion_context():
+    shoulder_y_history.clear()
+
+
+def update_motion_context(raw_landmarks: np.ndarray):
+    """
+    Lưu lịch sử độ cao vai gần đây để kiểm tra xem vai có vừa bị hạ thấp xuống không.
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return
+
+    left_shoulder_vis = float(raw_landmarks[11, 3])
+    right_shoulder_vis = float(raw_landmarks[12, 3])
+    shoulder_visibility_mean = (left_shoulder_vis + right_shoulder_vis) / 2.0
+
+    if shoulder_visibility_mean < MIN_SHOULDER_VISIBILITY:
+        return
+
+    shoulder_center_y = float((raw_landmarks[11, 1] + raw_landmarks[12, 1]) / 2.0)
+    now = time.monotonic()
+    shoulder_y_history.append((now, shoulder_center_y))
+
+    max_age = RECENT_SHOULDER_DROP_SECONDS + 0.5
+    while shoulder_y_history and (now - shoulder_y_history[0][0]) > max_age:
+        shoulder_y_history.popleft()
+
+
+def get_recent_shoulder_drop_signal():
+    """
+    Trả về:
+    - recent_shoulder_drop: vai có vừa bị hạ từ cao xuống thấp trong 1-2 giây gần đây không
+    - shoulder_drop_delta: độ chênh y của vai trong cửa sổ thời gian gần đây
+
+    Trên ảnh:
+    - y nhỏ hơn = vai cao hơn
+    - y lớn hơn = vai thấp hơn
+    """
+    if not shoulder_y_history:
+        return False, 0.0
+
+    now = time.monotonic()
+    recent_points = [y for ts, y in shoulder_y_history if (now - ts) <= RECENT_SHOULDER_DROP_SECONDS]
+
+    if len(recent_points) < 3:
+        return False, 0.0
+
+    current_shoulder_y = recent_points[-1]
+    previous_highest_shoulder_y = min(recent_points[:-1]) if len(recent_points) > 1 else current_shoulder_y
+    shoulder_drop_delta = float(current_shoulder_y - previous_highest_shoulder_y)
+    recent_shoulder_drop = shoulder_drop_delta >= SHOULDER_DROP_Y_THRESHOLD
+
+    return recent_shoulder_drop, shoulder_drop_delta
+
+
 def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
     """
     Chỉ can thiệp riêng cho FALL:
-    - Nếu model đoán FALL nhưng người KHÔNG ở tư thế nằm => chưa cho vào FALL
+    - Nếu model đoán FALL thì phải có thêm dấu hiệu vai vừa bị hạ thấp xuống rõ rệt trong 1-2 giây gần đây
+    - Nếu không có shoulder-drop gần đây thì không cho vào FALL
     - Nếu đã vào FALL => GIỮ FALL cho đến khi người dùng đứng thẳng dậy liên tiếp
     - Ngồi dậy KHÔNG được thoát FALL
     """
@@ -304,15 +372,14 @@ def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
 
     if not fall_latched:
         if current_model_label == "FALL":
-            fall_posture = get_fall_entry_posture(raw_landmarks)
+            recent_shoulder_drop, _ = get_recent_shoulder_drop_signal()
 
-            if fall_posture == "lying":
+            if recent_shoulder_drop:
                 fall_latched = True
                 recovery_frame_count = 0
                 return "FALL"
 
-            # Model đoán FALL nhưng chưa thấy người nằm rõ ràng
-            return "Uncertain"
+            return "ADL"
 
         return current_model_label
 
@@ -328,7 +395,8 @@ def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
     if recovery_frame_count >= RECOVERY_CONSEC_FRAMES:
         fall_latched = False
         recovery_frame_count = 0
-        pred_history.clear()  # giảm nguy cơ model bị trễ vài frame rồi vào FALL lại ngay
+        pred_history.clear()   # giảm nguy cơ model bị trễ vài frame rồi vào FALL lại ngay
+        reset_motion_context() # reset ngữ cảnh cũ sau khi đã đứng dậy lại
         return "ADL"
 
     return "FALL"
@@ -395,9 +463,7 @@ def draw_class_on_image(label_text, conf_text, img):
         action_color = (0, 165, 255)
     elif label_text == "Low visibility":
         action_color = (0, 255, 255)
-    elif label_text == "Uncertain":
-        action_color = (255, 255, 0)
-    else:
+    else: 
         action_color = (255, 255, 255)
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)
@@ -655,6 +721,8 @@ try:
             img = draw_landmark_on_image(results, img)
 
             raw_landmarks = extract_current_landmarks(results)
+            update_motion_context(raw_landmarks)
+
             c_lm, new_prev_landmarks = make_landmark_timestep(results, prev_landmarks)
 
             # chỉ thêm vào sequence nếu frame đủ chất lượng
@@ -663,7 +731,7 @@ try:
                 lm_list.append(c_lm)
 
                 if len(lm_list) > NO_OF_TIMESTEPS:
-                    lm_list.pop(0)  
+                    lm_list.pop(0)
 
                 if len(lm_list) == NO_OF_TIMESTEPS and frame_count % PREDICT_EVERY_N_FRAMES == 0:
                     detect(model, lm_list)
@@ -680,6 +748,9 @@ try:
             pred_history.clear()
             lm_list.clear()
             prev_landmarks = None
+
+            if not fall_latched:
+                reset_motion_context()
 
             if frame_count > warmup_frames:
                 if fall_latched:

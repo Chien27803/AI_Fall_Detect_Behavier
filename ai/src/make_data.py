@@ -4,9 +4,9 @@ import pandas as pd
 import os
 
 # ====== CONFIG ======
-label = "ADL"   # đổi label khi thu hành động khác
+label = "FALL"   # đổi label khi thu hành động khác
 subject_name = "subject7"
-no_of_frames = 210      # số frame cho 1 sample (chuẩn LSTM)
+no_of_frames = 140      # số frame cho 1 sample (chuẩn LSTM)
 
 base_save_path = "dataset"
 subfolder_name = "train_s7"

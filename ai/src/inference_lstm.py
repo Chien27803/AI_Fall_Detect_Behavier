@@ -53,12 +53,18 @@ LYING_HORIZONTAL_RATIO_MIN = 1.20
 # ====== RECENT FALL TRANSITION CONFIG ======
 # Điều kiện vào FALL mới:
 # - model đoán FALL
-# - trong khoảng 1-2 giây gần đây, vai có chuyển từ cao xuống thấp rõ rệt
+# - trong khoảng 1.5 giây gần đây, vai có chuyển từ cao xuống thấp rõ rệt
+#   HOẶC hông có chuyển từ cao xuống thấp rõ rệt
 # Lưu ý: trên ảnh, trục y tăng nghĩa là điểm bị hạ thấp xuống.
 SHOULDER_HISTORY_MAXLEN = 120
 RECENT_SHOULDER_DROP_SECONDS = 1.5
 SHOULDER_DROP_Y_THRESHOLD = 0.16
 MIN_SHOULDER_VISIBILITY = 0.50
+
+HIP_HISTORY_MAXLEN = 120
+RECENT_HIP_DROP_SECONDS = 1.5
+HIP_DROP_Y_THRESHOLD = 0.12
+MIN_HIP_VISIBILITY = 0.50
 
 # ====== FALL HOLD / RECOVERY CONFIG ======
 # Khi đã vào FALL thì CHỈ thoát khi người đó đứng thẳng dậy rõ ràng.
@@ -110,6 +116,7 @@ recovery_frame_count = 0
 
 # ====== RECENT MOTION CONTEXT ======
 shoulder_y_history = deque(maxlen=SHOULDER_HISTORY_MAXLEN)
+hip_y_history = deque(maxlen=HIP_HISTORY_MAXLEN)
 
 # ====== LOAD MODEL ======
 if not os.path.exists(MODEL_PATH):
@@ -308,35 +315,52 @@ def get_recovery_posture(raw_landmarks: np.ndarray) -> str:
 
 def reset_motion_context():
     shoulder_y_history.clear()
+    hip_y_history.clear()
 
 
 def update_motion_context(raw_landmarks: np.ndarray):
     """
-    Lưu lịch sử độ cao vai gần đây để kiểm tra xem vai có vừa bị hạ thấp xuống không.
+    Lưu lịch sử độ cao vai và hông gần đây để kiểm tra:
+    - vai có vừa bị hạ thấp xuống không
+    - hông có vừa bị hạ thấp xuống không
     """
     if raw_landmarks is None or raw_landmarks.shape != (33, 4):
         return
 
+    now = time.monotonic()
+
+    # ===== Shoulder history =====
     left_shoulder_vis = float(raw_landmarks[11, 3])
     right_shoulder_vis = float(raw_landmarks[12, 3])
     shoulder_visibility_mean = (left_shoulder_vis + right_shoulder_vis) / 2.0
 
-    if shoulder_visibility_mean < MIN_SHOULDER_VISIBILITY:
-        return
+    if shoulder_visibility_mean >= MIN_SHOULDER_VISIBILITY:
+        shoulder_center_y = float((raw_landmarks[11, 1] + raw_landmarks[12, 1]) / 2.0)
+        shoulder_y_history.append((now, shoulder_center_y))
 
-    shoulder_center_y = float((raw_landmarks[11, 1] + raw_landmarks[12, 1]) / 2.0)
-    now = time.monotonic()
-    shoulder_y_history.append((now, shoulder_center_y))
+    # ===== Hip history =====
+    left_hip_vis = float(raw_landmarks[23, 3])
+    right_hip_vis = float(raw_landmarks[24, 3])
+    hip_visibility_mean = (left_hip_vis + right_hip_vis) / 2.0
 
-    max_age = RECENT_SHOULDER_DROP_SECONDS + 0.5
+    if hip_visibility_mean >= MIN_HIP_VISIBILITY:
+        hip_center_y = float((raw_landmarks[23, 1] + raw_landmarks[24, 1]) / 2.0)
+        hip_y_history.append((now, hip_center_y))
+
+    # ===== Xóa điểm quá cũ =====
+    max_age = max(RECENT_SHOULDER_DROP_SECONDS, RECENT_HIP_DROP_SECONDS) + 0.5
+
     while shoulder_y_history and (now - shoulder_y_history[0][0]) > max_age:
         shoulder_y_history.popleft()
+
+    while hip_y_history and (now - hip_y_history[0][0]) > max_age:
+        hip_y_history.popleft()
 
 
 def get_recent_shoulder_drop_signal():
     """
     Trả về:
-    - recent_shoulder_drop: vai có vừa bị hạ từ cao xuống thấp trong 1-2 giây gần đây không
+    - recent_shoulder_drop: vai có vừa bị hạ từ cao xuống thấp trong 1.5 giây gần đây không
     - shoulder_drop_delta: độ chênh y của vai trong cửa sổ thời gian gần đây
 
     Trên ảnh:
@@ -360,11 +384,41 @@ def get_recent_shoulder_drop_signal():
     return recent_shoulder_drop, shoulder_drop_delta
 
 
+def get_recent_hip_drop_signal():
+    """
+    Trả về:
+    - recent_hip_drop: hông có vừa bị hạ từ cao xuống thấp trong 1.5 giây gần đây không
+    - hip_drop_delta: độ chênh y của hông trong cửa sổ thời gian gần đây
+
+    Trên ảnh:
+    - y nhỏ hơn = hông cao hơn
+    - y lớn hơn = hông thấp hơn
+    """
+    if not hip_y_history:
+        return False, 0.0
+
+    now = time.monotonic()
+    recent_points = [y for ts, y in hip_y_history if (now - ts) <= RECENT_HIP_DROP_SECONDS]
+
+    if len(recent_points) < 3:
+        return False, 0.0
+
+    current_hip_y = recent_points[-1]
+    previous_highest_hip_y = min(recent_points[:-1]) if len(recent_points) > 1 else current_hip_y
+    hip_drop_delta = float(current_hip_y - previous_highest_hip_y)
+    recent_hip_drop = hip_drop_delta >= HIP_DROP_Y_THRESHOLD
+
+    return recent_hip_drop, hip_drop_delta
+
+
 def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
     """
     Chỉ can thiệp riêng cho FALL:
-    - Nếu model đoán FALL thì phải có thêm dấu hiệu vai vừa bị hạ thấp xuống rõ rệt trong 1-2 giây gần đây
-    - Nếu không có shoulder-drop gần đây thì không cho vào FALL
+    - Nếu model đoán FALL thì phải có thêm:
+        + vai vừa bị hạ thấp trong 1.5 giây gần đây
+          HOẶC
+        + hông vừa bị hạ thấp trong 1.5 giây gần đây
+    - Nếu không có cả 2 tín hiệu đó thì không cho vào FALL
     - Nếu đã vào FALL => GIỮ FALL cho đến khi người dùng đứng thẳng dậy liên tiếp
     - Ngồi dậy KHÔNG được thoát FALL
     """
@@ -372,11 +426,16 @@ def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
 
     if not fall_latched:
         if current_model_label == "FALL":
-            recent_shoulder_drop, _ = get_recent_shoulder_drop_signal()
+            recent_shoulder_drop, shoulder_drop_delta = get_recent_shoulder_drop_signal()
+            recent_hip_drop, hip_drop_delta = get_recent_hip_drop_signal()
 
-            if recent_shoulder_drop:
+            if recent_shoulder_drop or recent_hip_drop:
                 fall_latched = True
                 recovery_frame_count = 0
+                print(
+                    f"[FALL ENTRY] shoulder_drop={recent_shoulder_drop} ({shoulder_drop_delta:.3f}), "
+                    f"hip_drop={recent_hip_drop} ({hip_drop_delta:.3f})"
+                )
                 return "FALL"
 
             return "ADL"
@@ -463,7 +522,7 @@ def draw_class_on_image(label_text, conf_text, img):
         action_color = (0, 165, 255)
     elif label_text == "Low visibility":
         action_color = (0, 255, 255)
-    else: 
+    else:
         action_color = (255, 255, 255)
 
     cv2.putText(img, f"Action: {label_text}", (10, 30), font, 0.8, action_color, 2, cv2.LINE_AA)

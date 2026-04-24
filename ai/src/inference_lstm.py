@@ -53,18 +53,29 @@ LYING_HORIZONTAL_RATIO_MIN = 1.20
 # ====== RECENT FALL TRANSITION CONFIG ======
 # Điều kiện vào FALL mới:
 # - model đoán FALL
-# - trong khoảng 1.5 giây gần đây, vai có chuyển từ cao xuống thấp rõ rệt
-#   HOẶC hông có chuyển từ cao xuống thấp rõ rệt
-# Lưu ý: trên ảnh, trục y tăng nghĩa là điểm bị hạ thấp xuống.
+# - trong 1.5 giây gần nhất, 1 hoặc 2 vai có bị hạ từ cao xuống thấp
+#   VÀ vị trí hiện tại của vai đó đang sát mặt đất
+#   HOẶC mông/hông đang chạm sát mặt đất VÀ 2 chân duỗi tương đối thẳng.
+#
+# Quy ước MediaPipe/camera:
+# - y nhỏ hơn = điểm ở cao hơn
+# - y lớn hơn = điểm bị hạ thấp xuống
+# - mặt đất tạm tính bằng vị trí bàn chân/cổ chân thấp nhất nhìn thấy được.
 SHOULDER_HISTORY_MAXLEN = 120
 RECENT_SHOULDER_DROP_SECONDS = 1.5
 SHOULDER_DROP_Y_THRESHOLD = 0.16
 MIN_SHOULDER_VISIBILITY = 0.50
 
-HIP_HISTORY_MAXLEN = 120
-RECENT_HIP_DROP_SECONDS = 1.5
-HIP_DROP_Y_THRESHOLD = 0.12
+SHOULDER_NEAR_GROUND_MARGIN = 0.15
+HIP_NEAR_GROUND_MARGIN = 0.12
 MIN_HIP_VISIBILITY = 0.50
+MIN_KNEE_VISIBILITY = 0.50
+MIN_ANKLE_VISIBILITY_FOR_GROUND = 0.35
+
+# Điều kiện cho nhánh mông/hông chạm đất:
+# 2 chân phải duỗi tương đối thẳng thì mới cho phép vào FALL.
+# Góc gối càng gần 180 độ nghĩa là chân càng thẳng.
+LEG_STRAIGHT_KNEE_ANGLE_MIN = 145.0
 
 # ====== FALL HOLD / RECOVERY CONFIG ======
 # Khi đã vào FALL thì CHỈ thoát khi người đó đứng thẳng dậy rõ ràng.
@@ -115,8 +126,8 @@ fall_latched = False
 recovery_frame_count = 0
 
 # ====== RECENT MOTION CONTEXT ======
-shoulder_y_history = deque(maxlen=SHOULDER_HISTORY_MAXLEN)
-hip_y_history = deque(maxlen=HIP_HISTORY_MAXLEN)
+left_shoulder_y_history = deque(maxlen=SHOULDER_HISTORY_MAXLEN)
+right_shoulder_y_history = deque(maxlen=SHOULDER_HISTORY_MAXLEN)
 
 # ====== LOAD MODEL ======
 if not os.path.exists(MODEL_PATH):
@@ -314,111 +325,226 @@ def get_recovery_posture(raw_landmarks: np.ndarray) -> str:
 
 
 def reset_motion_context():
-    shoulder_y_history.clear()
-    hip_y_history.clear()
+    left_shoulder_y_history.clear()
+    right_shoulder_y_history.clear()
+
+
+def get_ground_y_from_feet(raw_landmarks: np.ndarray):
+    """
+    Lấy vị trí mặt đất tương đối theo bàn chân/cổ chân.
+    Trong ảnh, y càng lớn thì càng thấp. Vì vậy ground_y lấy theo điểm chân có y lớn nhất.
+    Ưu tiên ankle, nếu ankle visibility kém thì dùng thêm heel/foot_index.
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return None
+
+    # 27,28: ankle | 29,30: heel | 31,32: foot_index
+    foot_indices = [27, 28, 29, 30, 31, 32]
+    visible_foot_y = [
+        float(raw_landmarks[idx, 1])
+        for idx in foot_indices
+        if float(raw_landmarks[idx, 3]) >= MIN_ANKLE_VISIBILITY_FOR_GROUND
+    ]
+
+    if not visible_foot_y:
+        return None
+
+    return max(visible_foot_y)
 
 
 def update_motion_context(raw_landmarks: np.ndarray):
     """
-    Lưu lịch sử độ cao vai và hông gần đây để kiểm tra:
-    - vai có vừa bị hạ thấp xuống không
-    - hông có vừa bị hạ thấp xuống không
+    Lưu lịch sử độ cao vai trái/phải gần đây để kiểm tra:
+    - trong 1.5s gần nhất vai có bị hạ từ cao xuống thấp không.
     """
     if raw_landmarks is None or raw_landmarks.shape != (33, 4):
         return
 
     now = time.monotonic()
 
-    # ===== Shoulder history =====
     left_shoulder_vis = float(raw_landmarks[11, 3])
     right_shoulder_vis = float(raw_landmarks[12, 3])
-    shoulder_visibility_mean = (left_shoulder_vis + right_shoulder_vis) / 2.0
 
-    if shoulder_visibility_mean >= MIN_SHOULDER_VISIBILITY:
-        shoulder_center_y = float((raw_landmarks[11, 1] + raw_landmarks[12, 1]) / 2.0)
-        shoulder_y_history.append((now, shoulder_center_y))
+    if left_shoulder_vis >= MIN_SHOULDER_VISIBILITY:
+        left_shoulder_y_history.append((now, float(raw_landmarks[11, 1])))
 
-    # ===== Hip history =====
-    left_hip_vis = float(raw_landmarks[23, 3])
-    right_hip_vis = float(raw_landmarks[24, 3])
-    hip_visibility_mean = (left_hip_vis + right_hip_vis) / 2.0
+    if right_shoulder_vis >= MIN_SHOULDER_VISIBILITY:
+        right_shoulder_y_history.append((now, float(raw_landmarks[12, 1])))
 
-    if hip_visibility_mean >= MIN_HIP_VISIBILITY:
-        hip_center_y = float((raw_landmarks[23, 1] + raw_landmarks[24, 1]) / 2.0)
-        hip_y_history.append((now, hip_center_y))
+    max_age = RECENT_SHOULDER_DROP_SECONDS + 0.5
 
-    # ===== Xóa điểm quá cũ =====
-    max_age = max(RECENT_SHOULDER_DROP_SECONDS, RECENT_HIP_DROP_SECONDS) + 0.5
+    while left_shoulder_y_history and (now - left_shoulder_y_history[0][0]) > max_age:
+        left_shoulder_y_history.popleft()
 
-    while shoulder_y_history and (now - shoulder_y_history[0][0]) > max_age:
-        shoulder_y_history.popleft()
-
-    while hip_y_history and (now - hip_y_history[0][0]) > max_age:
-        hip_y_history.popleft()
+    while right_shoulder_y_history and (now - right_shoulder_y_history[0][0]) > max_age:
+        right_shoulder_y_history.popleft()
 
 
-def get_recent_shoulder_drop_signal():
+def get_recent_single_shoulder_drop_signal(shoulder_history: deque, current_shoulder_y: float):
     """
-    Trả về:
-    - recent_shoulder_drop: vai có vừa bị hạ từ cao xuống thấp trong 1.5 giây gần đây không
-    - shoulder_drop_delta: độ chênh y của vai trong cửa sổ thời gian gần đây
-
-    Trên ảnh:
-    - y nhỏ hơn = vai cao hơn
-    - y lớn hơn = vai thấp hơn
+    Kiểm tra 1 vai có vừa bị hạ từ cao xuống thấp trong 1.5 giây gần đây không.
     """
-    if not shoulder_y_history:
+    if not shoulder_history:
         return False, 0.0
 
     now = time.monotonic()
-    recent_points = [y for ts, y in shoulder_y_history if (now - ts) <= RECENT_SHOULDER_DROP_SECONDS]
+    recent_points = [y for ts, y in shoulder_history if (now - ts) <= RECENT_SHOULDER_DROP_SECONDS]
 
     if len(recent_points) < 3:
         return False, 0.0
 
-    current_shoulder_y = recent_points[-1]
-    previous_highest_shoulder_y = min(recent_points[:-1]) if len(recent_points) > 1 else current_shoulder_y
+    previous_highest_shoulder_y = min(recent_points[:-1])
     shoulder_drop_delta = float(current_shoulder_y - previous_highest_shoulder_y)
     recent_shoulder_drop = shoulder_drop_delta >= SHOULDER_DROP_Y_THRESHOLD
 
     return recent_shoulder_drop, shoulder_drop_delta
 
 
-def get_recent_hip_drop_signal():
+def is_shoulder_near_ground(current_shoulder_y: float, ground_y: float) -> bool:
+    return current_shoulder_y >= (ground_y - SHOULDER_NEAR_GROUND_MARGIN)
+
+
+def get_recent_shoulder_drop_near_ground_signal(raw_landmarks: np.ndarray):
     """
-    Trả về:
-    - recent_hip_drop: hông có vừa bị hạ từ cao xuống thấp trong 1.5 giây gần đây không
-    - hip_drop_delta: độ chênh y của hông trong cửa sổ thời gian gần đây
-
-    Trên ảnh:
-    - y nhỏ hơn = hông cao hơn
-    - y lớn hơn = hông thấp hơn
+    True nếu trong 1.5s gần đây có 1 hoặc 2 vai bị hạ từ cao xuống thấp
+    và hiện tại vai đó đang sát mặt đất.
     """
-    if not hip_y_history:
-        return False, 0.0
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return False, "invalid_landmarks"
 
-    now = time.monotonic()
-    recent_points = [y for ts, y in hip_y_history if (now - ts) <= RECENT_HIP_DROP_SECONDS]
+    ground_y = get_ground_y_from_feet(raw_landmarks)
+    if ground_y is None:
+        return False, "ground_unknown"
 
-    if len(recent_points) < 3:
-        return False, 0.0
+    left_signal = False
+    right_signal = False
+    left_delta = 0.0
+    right_delta = 0.0
 
-    current_hip_y = recent_points[-1]
-    previous_highest_hip_y = min(recent_points[:-1]) if len(recent_points) > 1 else current_hip_y
-    hip_drop_delta = float(current_hip_y - previous_highest_hip_y)
-    recent_hip_drop = hip_drop_delta >= HIP_DROP_Y_THRESHOLD
+    left_vis = float(raw_landmarks[11, 3])
+    if left_vis >= MIN_SHOULDER_VISIBILITY:
+        left_y = float(raw_landmarks[11, 1])
+        left_drop, left_delta = get_recent_single_shoulder_drop_signal(left_shoulder_y_history, left_y)
+        left_signal = left_drop and is_shoulder_near_ground(left_y, ground_y)
 
-    return recent_hip_drop, hip_drop_delta
+    right_vis = float(raw_landmarks[12, 3])
+    if right_vis >= MIN_SHOULDER_VISIBILITY:
+        right_y = float(raw_landmarks[12, 1])
+        right_drop, right_delta = get_recent_single_shoulder_drop_signal(right_shoulder_y_history, right_y)
+        right_signal = right_drop and is_shoulder_near_ground(right_y, ground_y)
+
+    detail = (
+        f"left={left_signal}({left_delta:.3f}), "
+        f"right={right_signal}({right_delta:.3f}), "
+        f"ground_y={ground_y:.3f}"
+    )
+
+    return left_signal or right_signal, detail
+
+
+def calculate_angle_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    """
+    Tính góc ABC theo mặt phẳng ảnh 2D.
+    Dùng cho góc gối: hip - knee - ankle.
+    Góc gần 180 độ nghĩa là chân tương đối thẳng.
+    """
+    a = np.array(a[:2], dtype=np.float32)
+    b = np.array(b[:2], dtype=np.float32)
+    c = np.array(c[:2], dtype=np.float32)
+
+    ba = a - b
+    bc = c - b
+
+    norm_ba = float(np.linalg.norm(ba))
+    norm_bc = float(np.linalg.norm(bc))
+
+    if norm_ba < 1e-6 or norm_bc < 1e-6:
+        return 0.0
+
+    cosine = float(np.dot(ba, bc) / (norm_ba * norm_bc))
+    cosine = float(np.clip(cosine, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def are_both_legs_relatively_straight(raw_landmarks: np.ndarray):
+    """
+    Kiểm tra 2 chân có duỗi tương đối thẳng không.
+    Dùng góc tại đầu gối:
+    - chân trái: left_hip - left_knee - left_ankle
+    - chân phải: right_hip - right_knee - right_ankle
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return False, "invalid_landmarks"
+
+    left_idxs = [23, 25, 27]
+    right_idxs = [24, 26, 28]
+
+    left_visibility = float(np.mean(raw_landmarks[left_idxs, 3]))
+    right_visibility = float(np.mean(raw_landmarks[right_idxs, 3]))
+
+    min_leg_visibility = min(MIN_HIP_VISIBILITY, MIN_KNEE_VISIBILITY, MIN_ANKLE_VISIBILITY_FOR_GROUND)
+
+    if left_visibility < min_leg_visibility or right_visibility < min_leg_visibility:
+        return False, f"leg_low_visibility left={left_visibility:.2f}, right={right_visibility:.2f}"
+
+    left_angle = calculate_angle_2d(raw_landmarks[23], raw_landmarks[25], raw_landmarks[27])
+    right_angle = calculate_angle_2d(raw_landmarks[24], raw_landmarks[26], raw_landmarks[28])
+
+    left_straight = left_angle >= LEG_STRAIGHT_KNEE_ANGLE_MIN
+    right_straight = right_angle >= LEG_STRAIGHT_KNEE_ANGLE_MIN
+    both_straight = left_straight and right_straight
+
+    detail = (
+        f"legs_straight={both_straight}, "
+        f"left_knee_angle={left_angle:.1f}, right_knee_angle={right_angle:.1f}"
+    )
+    return both_straight, detail
+
+
+def get_hip_touch_ground_with_straight_legs_signal(raw_landmarks: np.ndarray):
+    """
+    Kiểm tra nhánh mông/hông:
+    - mông/hông chạm sát mặt đất
+    - VÀ 2 chân phải duỗi tương đối thẳng
+
+    Vì MediaPipe không có landmark riêng cho mông, dùng tâm 2 hông trái/phải làm xấp xỉ.
+    """
+    if raw_landmarks is None or raw_landmarks.shape != (33, 4):
+        return False, "invalid_landmarks"
+
+    ground_y = get_ground_y_from_feet(raw_landmarks)
+    if ground_y is None:
+        return False, "ground_unknown"
+
+    left_hip_vis = float(raw_landmarks[23, 3])
+    right_hip_vis = float(raw_landmarks[24, 3])
+    hip_visibility_mean = (left_hip_vis + right_hip_vis) / 2.0
+
+    if hip_visibility_mean < MIN_HIP_VISIBILITY:
+        return False, "hip_low_visibility"
+
+    hip_center_y = float((raw_landmarks[23, 1] + raw_landmarks[24, 1]) / 2.0)
+    hip_near_ground = hip_center_y >= (ground_y - HIP_NEAR_GROUND_MARGIN)
+
+    legs_straight, legs_detail = are_both_legs_relatively_straight(raw_landmarks)
+    hip_ok = hip_near_ground and legs_straight
+
+    detail = (
+        f"hip_near_ground={hip_near_ground}, hip_y={hip_center_y:.3f}, "
+        f"ground_y={ground_y:.3f}, {legs_detail}"
+    )
+    return hip_ok, detail
 
 
 def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
     """
     Chỉ can thiệp riêng cho FALL:
-    - Nếu model đoán FALL thì phải có thêm:
-        + vai vừa bị hạ thấp trong 1.5 giây gần đây
+    - Nếu model đoán FALL thì phải check thêm:
+        + trong 1.5s gần nhất, 1 hoặc 2 vai bị hạ từ cao xuống thấp
+          và vai đó đang sát mặt đất, mặt đất tính theo bàn chân/cổ chân
           HOẶC
-        + hông vừa bị hạ thấp trong 1.5 giây gần đây
-    - Nếu không có cả 2 tín hiệu đó thì không cho vào FALL
+        + mông/hông đang chạm sát mặt đất VÀ 2 chân duỗi tương đối thẳng
+    - Nếu không có các tín hiệu trên thì không cho label_text hiển thị FALL
     - Nếu đã vào FALL => GIỮ FALL cho đến khi người dùng đứng thẳng dậy liên tiếp
     - Ngồi dậy KHÔNG được thoát FALL
     """
@@ -426,18 +552,22 @@ def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
 
     if not fall_latched:
         if current_model_label == "FALL":
-            recent_shoulder_drop, shoulder_drop_delta = get_recent_shoulder_drop_signal()
-            recent_hip_drop, hip_drop_delta = get_recent_hip_drop_signal()
+            shoulder_ok, shoulder_detail = get_recent_shoulder_drop_near_ground_signal(raw_landmarks)
+            hip_ok, hip_detail = get_hip_touch_ground_with_straight_legs_signal(raw_landmarks)
 
-            if recent_shoulder_drop or recent_hip_drop:
+            if shoulder_ok or hip_ok:
                 fall_latched = True
                 recovery_frame_count = 0
                 print(
-                    f"[FALL ENTRY] shoulder_drop={recent_shoulder_drop} ({shoulder_drop_delta:.3f}), "
-                    f"hip_drop={recent_hip_drop} ({hip_drop_delta:.3f})"
+                    f"[FALL ENTRY] shoulder_ok={shoulder_ok} ({shoulder_detail}), "
+                    f"hip_ok={hip_ok} ({hip_detail})"
                 )
                 return "FALL"
 
+            print(
+                f"[FALL BLOCKED] model=FALL nhưng chưa đủ rule. "
+                f"shoulder=({shoulder_detail}), hip=({hip_detail})"
+            )
             return "ADL"
 
         return current_model_label
@@ -454,12 +584,11 @@ def apply_fall_hold(current_model_label: str, raw_landmarks: np.ndarray) -> str:
     if recovery_frame_count >= RECOVERY_CONSEC_FRAMES:
         fall_latched = False
         recovery_frame_count = 0
-        pred_history.clear()   # giảm nguy cơ model bị trễ vài frame rồi vào FALL lại ngay
-        reset_motion_context() # reset ngữ cảnh cũ sau khi đã đứng dậy lại
+        pred_history.clear()
+        reset_motion_context()
         return "ADL"
 
     return "FALL"
-
 
 def make_landmark_timestep(results, prev_landmarks=None):
     current_landmarks = extract_current_landmarks(results)  # (33, 4)

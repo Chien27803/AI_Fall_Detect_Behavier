@@ -2,14 +2,17 @@ import cv2
 import mediapipe as mp
 import pandas as pd
 import os
+import time
 
 # ====== CONFIG ======
-label = "FALL"   # đổi label khi thu hành động khác
-subject_name = "subject10"
+label = "ADL"   # đổi label khi thu hành động khác
+subject_name = "subject2"
 no_of_frames = 140      # số frame cho 1 sample (chuẩn LSTM)
 
+countdown_seconds = 10  # sau khi bấm r, đợi 10 giây mới record
+
 base_save_path = "dataset"
-subfolder_name = "train_s10"
+subfolder_name = "train_s2"
 save_path = os.path.join(base_save_path, subfolder_name)
 
 os.makedirs(save_path, exist_ok=True)
@@ -23,8 +26,11 @@ pose = mpPose.Pose()
 mpDraw = mp.solutions.drawing_utils
 
 lm_list = []
-recording = False  # trạng thái ghi
-prev_landmarks = None  # dùng để tính vx, vy, vz
+recording = False          # đang ghi dữ liệu thật
+counting_down = False      # đang đếm ngược trước khi ghi
+countdown_start_time = None
+
+prev_landmarks = None      # dùng để tính vx, vy, vz
 
 
 # ====== FUNCTION ======
@@ -78,6 +84,20 @@ while True:
     frameRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(frameRGB)
 
+    # ====== XỬ LÝ ĐẾM NGƯỢC ======
+    if counting_down:
+        elapsed = time.time() - countdown_start_time
+        remaining = countdown_seconds - int(elapsed)
+
+        if elapsed >= countdown_seconds:
+            print("✅ Start recording now!")
+
+            counting_down = False
+            recording = True
+
+            lm_list = []
+            prev_landmarks = None
+
     if results.pose_landmarks:
         frame = draw_landmark_on_image(results, frame)
 
@@ -103,26 +123,69 @@ while True:
             prev_landmarks = None
 
     # ====== HIỂN THỊ ======
-    status = "RECORDING..." if recording else "Press 'r' to record"
-    cv2.putText(
-        frame,
-        status,
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0, 255, 0),
-        2
-    )
+    if counting_down:
+        elapsed = time.time() - countdown_start_time
+        remaining = max(0, countdown_seconds - int(elapsed))
+
+        status = f"Recording starts in {remaining}s"
+
+        cv2.putText(
+            frame,
+            status,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            str(remaining),
+            (frame.shape[1] // 2 - 40, frame.shape[0] // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            3,
+            (0, 0, 255),
+            5
+        )
+
+    elif recording:
+        status = f"RECORDING... {len(lm_list)}/{no_of_frames}"
+
+        cv2.putText(
+            frame,
+            status,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+    else:
+        status = "Press 'r' to record"
+
+        cv2.putText(
+            frame,
+            status,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
 
     cv2.imshow("Data Collection", frame)
 
     key = cv2.waitKey(1)
 
     if key == ord('r'):
-        print("🎬 Start recording...")
-        recording = True
-        lm_list = []
-        prev_landmarks = None
+        if not recording and not counting_down:
+            print("⏳ Countdown started. Recording will start after 10 seconds...")
+            counting_down = True
+            countdown_start_time = time.time()
+            lm_list = []
+            prev_landmarks = None
 
     elif key == ord('q'):
         break

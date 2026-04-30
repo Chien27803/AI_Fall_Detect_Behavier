@@ -101,11 +101,11 @@ STAND_HIP_KNEE_MARGIN = 0.08
 STAND_KNEE_ANKLE_MARGIN = 0.04
 
 # ====== TELEGRAM CONFIG ======
-TELEGRAM_ENABLED = False  # True
+TELEGRAM_ENABLED = True  # True
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_TIMEOUT = (3, 10)
-FALL_CONFIRM_SECONDS = 5.0
+FALL_CONFIRM_SECONDS = 1.0
 FALL_END_GRACE_SECONDS = 1.5
 
 label = "Warmup..."
@@ -943,7 +943,7 @@ def handle_telegram_fall_alert(current_label, frame):
             fall_event_active = True
             fall_event_start_time = now
             fall_event_sent = False
-            print("Bắt đầu sự kiện FALL, đang đếm 5 giây...")
+            print("Bắt đầu sự kiện FALL, đang đếm 1 giây...")
 
         fall_duration = now - fall_event_start_time
 
